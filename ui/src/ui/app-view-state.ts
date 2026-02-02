@@ -30,7 +30,7 @@ import type {
   ToolsCatalogResult,
   StatusSummary,
 } from "./types.ts";
-import type { ChatAttachment, ChatQueueItem } from "./ui-types.ts";
+import type { ChatAttachment, ChatQueueItem, TerminalSession } from "./ui-types.ts";
 import type { NostrProfileFormState } from "./views/channels.nostr-profile-form.ts";
 import type { SessionLogEntry } from "./views/usage.ts";
 
@@ -255,6 +255,8 @@ export type AppViewState = {
     logsLimit: number;
     logsMaxBytes: number;
     logsAtBottom: boolean;
+    terminalSessions: TerminalSession[];
+    terminalActiveId: string | null;
     updateAvailable: import("./types.js").UpdateAvailable | null;
     client: GatewayBrowserClient | null;
     refreshSessionsAfterChat: Set<string>;

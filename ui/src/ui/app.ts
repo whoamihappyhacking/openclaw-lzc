@@ -82,7 +82,7 @@ import type {
   StatusSummary,
   NostrProfile,
 } from "./types.ts";
-import { type ChatAttachment, type ChatQueueItem, type CronFormState } from "./ui-types.ts";
+import { type ChatAttachment, type ChatQueueItem, type CronFormState, type TerminalSession } from "./ui-types.ts";
 import { generateUUID } from "./uuid.ts";
 import type { NostrProfileFormState } from "./views/channels.nostr-profile-form.ts";
 
@@ -377,6 +377,10 @@ export class OpenClawApp extends LitElement {
   @state() logsLimit = 500;
   @state() logsMaxBytes = 250_000;
   @state() logsAtBottom = true;
+
+  // Terminal state
+  @state() terminalSessions: TerminalSession[] = [];
+  @state() terminalActiveId: string | null = null;
 
   client: GatewayBrowserClient | null = null;
   private chatScrollFrame: number | null = null;
