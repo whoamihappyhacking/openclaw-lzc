@@ -67,6 +67,7 @@ import {
 } from "./server/plugins-http.js";
 import type { ReadinessChecker } from "./server/readiness.js";
 import type { GatewayWsClient } from "./server/ws-types.js";
+import { createTerminalWebSocketServer, handleTerminalUpgrade } from "./terminal/ws-handler.js";
 import { handleToolsInvokeHttpRequest } from "./tools-invoke-http.js";
 
 type SubsystemLogger = ReturnType<typeof createSubsystemLogger>;
@@ -795,6 +796,7 @@ export function attachGatewayUpgradeHandler(opts: {
   rateLimiter?: AuthRateLimiter;
 }) {
   const { httpServer, wss, canvasHost, clients, resolvedAuth, rateLimiter } = opts;
+  const terminalWss = createTerminalWebSocketServer();
   httpServer.on("upgrade", (req, socket, head) => {
     void (async () => {
       const scopedCanvas = normalizeCanvasScopedUrl(req.url ?? "/");
@@ -832,6 +834,11 @@ export function attachGatewayUpgradeHandler(opts: {
           return;
         }
       }
+
+      if (handleTerminalUpgrade(terminalWss, req, socket, head, { resolvedAuth })) {
+        return;
+      }
+
       wss.handleUpgrade(req, socket, head, (ws) => {
         wss.emit("connection", ws, req);
       });

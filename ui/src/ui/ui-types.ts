@@ -52,3 +52,9 @@ export type CronFormState = {
   failureAlertAccountId: string;
   timeoutSeconds: string;
 };
+
+export type TerminalSession = {
+  id: string;
+  title: string;
+  createdAt: number;
+};

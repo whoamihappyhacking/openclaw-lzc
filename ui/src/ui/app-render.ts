@@ -89,6 +89,13 @@ import { renderNodes } from "./views/nodes.ts";
 import { renderOverview } from "./views/overview.ts";
 import { renderSessions } from "./views/sessions.ts";
 import { renderSkills } from "./views/skills.ts";
+import { renderUsage } from "./views/usage.ts";
+import { renderTerminal } from "./views/terminal.ts";
+import {
+  createTerminalSession,
+  closeTerminalSession,
+  mountTerminal,
+} from "./controllers/terminal.ts";
 
 const AVATAR_DATA_RE = /^data:/i;
 const AVATAR_HTTP_RE = /^https?:\/\//i;
@@ -847,6 +854,20 @@ export function renderApp(state: AppViewState) {
                   }
                   updateConfigFormValue(state, basePath, { primary, fallbacks: normalized });
                 },
+              })
+            : nothing
+        }
+
+        ${
+          state.tab === "terminal"
+            ? renderTerminal({
+                connected: state.connected,
+                sessions: state.terminalSessions,
+                activeId: state.terminalActiveId,
+                onCreateSession: () => createTerminalSession(state),
+                onCloseSession: (id) => closeTerminalSession(state, id),
+                onSwitchSession: (id) => (state.terminalActiveId = id),
+                onMount: (id, container) => void mountTerminal(id, container, state.settings.token),
               })
             : nothing
         }
