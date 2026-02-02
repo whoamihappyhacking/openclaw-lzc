@@ -47,8 +47,7 @@ RUN apt-get update && \
 # 设置 Chromium 路径环境变量
 ENV CHROMIUM_PATH=/usr/bin/chromium
 
-WORKDIR /app
-
+# ========== 可选的额外 apt 包 ==========
 ARG CLAWDBOT_DOCKER_APT_PACKAGES=""
 RUN if [ -n "$CLAWDBOT_DOCKER_APT_PACKAGES" ]; then \
       apt-get update && \
@@ -57,7 +56,9 @@ RUN if [ -n "$CLAWDBOT_DOCKER_APT_PACKAGES" ]; then \
       rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*; \
     fi
 
-# ========== 直接复制本地构建产物 ==========
+# ========== 代码放到 /app-image（只读模板） ==========
+WORKDIR /app-image
+
 # 复制 package.json 等配置文件
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
 COPY ui/package.json ./ui/package.json
@@ -73,6 +74,9 @@ COPY dist ./dist
 COPY docs/reference/templates ./docs/reference/templates
 COPY extensions ./extensions
 
+# 运行目录是 /app（会被持久化挂载覆盖）
+WORKDIR /app
+
 ENV NODE_ENV=production
 # 数据目录 - 使用 openclaw 标准路径
 ENV OPENCLAW_STATE_DIR=/home/node/.openclaw
@@ -80,7 +84,7 @@ ENV OPENCLAW_STATE_DIR=/home/node/.openclaw
 # ========== 配置用户 ==========
 RUN echo "node ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers && \
     mkdir -p /home/node/.openclaw && \
-    chown -R node:node /home/node /app
+    chown -R node:node /home/node /app-image
 
 WORKDIR /app
 
@@ -101,6 +105,38 @@ COPY --chown=node:node docker-workspace/ /home/node/clawd/
 COPY --chmod=755 <<'EOF' /usr/local/bin/clawdbot-entrypoint.sh
 #!/bin/bash
 set -e
+
+# ========== App 持久化逻辑 ==========
+APP_IMAGE="/app-image"
+APP_LIVE="/app"
+VERSION_FILE="$APP_LIVE/.openclaw-version"
+
+# 从 package.json 提取版本
+get_image_version() {
+  grep '"version"' "$APP_IMAGE/package.json" | head -1 | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/'
+}
+
+IMAGE_VERSION=$(get_image_version)
+
+# 首次启动：复制代码
+if [ ! -f "$APP_LIVE/package.json" ]; then
+  echo "[openclaw] First run, copying app from image..."
+  cp -r "$APP_IMAGE/"* "$APP_LIVE/"
+  echo "$IMAGE_VERSION" > "$VERSION_FILE"
+  echo "[openclaw] App initialized (version: $IMAGE_VERSION)"
+fi
+
+# 版本检测（提示更新）
+if [ -f "$VERSION_FILE" ]; then
+  CURRENT_VERSION=$(cat "$VERSION_FILE")
+  if [ "$CURRENT_VERSION" != "$IMAGE_VERSION" ]; then
+    echo "[openclaw] =================================================="
+    echo "[openclaw] New version available: $IMAGE_VERSION"
+    echo "[openclaw] Current version: $CURRENT_VERSION"
+    echo "[openclaw] To update, run: rm -rf /app/* && restart container"
+    echo "[openclaw] =================================================="
+  fi
+fi
 
 # 配置目录 - 使用标准 openclaw 路径
 CONFIG_DIR="${OPENCLAW_STATE_DIR:-/home/node/.openclaw}"
@@ -246,12 +282,14 @@ case "$CMD" in
     init_workspace
     update_agents_domain
     init_config
+    cd "$APP_LIVE"
     exec node dist/index.js "$@"
     ;;
   *)
     # 普通 CLI 模式: 初始化 workspace、更新域名、以 root 运行
     init_workspace
     update_agents_domain
+    cd "$APP_LIVE"
     exec node dist/index.js "$@"
     ;;
 esac
