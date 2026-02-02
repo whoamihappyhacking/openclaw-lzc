@@ -47,6 +47,7 @@ Core/
 Users/
 vendor/
 
+
 # Needed for building the Canvas A2UI bundle during Docker image builds.
 # Keep the rest of apps/ and vendor/ excluded to avoid a large build context.
 !apps/shared/
@@ -62,3 +63,12 @@ vendor/
 !vendor/a2ui/renderers/
 !vendor/a2ui/renderers/lit/
 !vendor/a2ui/renderers/lit/**
+
+data/
+
+# Dockerfile.lzc 需要这些文件（用 ! 重新包含）
+!node_modules
+!ui/node_modules
+!dist
+!ui/dist
+

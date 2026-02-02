@@ -1,0 +1,62 @@
+# Clawdbot Docker Compose - 精简版
+# 配置已内置到镜像中,只需设置必要参数
+#
+# 使用方法:
+#   docker build -t clawdbot:local -f Dockerfile.lzc .
+#   docker compose -f docker-compose-lzc.yml up -d
+#   浏览器访问 http://localhost:18789 进入 Web UI
+
+services:
+  clawdbot:
+    image: clawdbot:local
+    container_name: clawdbot
+    hostname: clawdbot
+    network_mode: host
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    environment:
+      # 基础环境
+      HOME: /home/node
+      TERM: xterm-256color
+
+      # Canvas 访问域名 (不需要协议头,脚本会自动添加: localhost 用 http, 其他用 https)
+      LAZYCAT_APP_DOMAIN: "localhost:18789"
+
+      # Gateway 认证(可选,容器内已有默认值)
+      # GATEWAY_TOKEN: "your-custom-token"
+
+    volumes:
+      # 数据目录 - 配置、会话、缓存等 (标准 openclaw 路径)
+      - ./data/openclaw:/home/node/.openclaw
+
+      # 工作目录 - AGENTS.md、skills、canvas 等
+      - ./data/workspace:/home/node/clawd
+
+    init: true
+    restart: unless-stopped
+    command: ["gateway", "--bind", "lan", "--port", "18789"]
+    healthcheck:
+      test: ["CMD", "node", "dist/index.js", "health", "--json"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+# ========== 说明 ==========
+#
+# 所有配置已内置到镜像:
+# - AGENTS.md 和 skills 已预装在 /home/node/clawd
+# - 模型配置在首次启动时通过 entrypoint 脚本自动生成
+# - 数据持久化在 /home/node/.openclaw (标准 openclaw 路径)
+#
+# 如需修改模型配置:
+#   1. 启动容器后访问 http://localhost:18789
+#   2. 在 Control UI 的 Config 页面修改
+#   3. 或者直接编辑宿主机的 ./data/openclaw/openclaw.json
+#
+# 常用命令:
+#   启动: docker compose -f docker-compose-lzc.yml up -d
+#   日志: docker compose -f docker-compose-lzc.yml logs -f
+#   停止: docker compose -f docker-compose-lzc.yml down
+#   重启: docker compose -f docker-compose-lzc.yml restart
