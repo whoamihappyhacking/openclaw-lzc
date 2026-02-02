@@ -1,0 +1,89 @@
+package: iamxiaoe.lzcapp.openclaw
+version: 1.0.0
+name: OpenClaw
+description: 真正能做事的AI Agent
+author: https://openclaw.ai
+application:
+  subdomain: openclaw
+  routes:
+    - /=http://openclaw:18789
+  ingress:
+    - protocol: tcp
+      port: 18789
+      services: openclaw
+    - protocol: tcp
+      port: 18782
+      services: openclaw
+    - protocol: tcp
+      port: 18800
+      services: openclaw
+
+services:
+  openclaw:
+    image: registry.lazycat.cloud/openclaw:1.0.0
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    environment:
+      - HOME=/home/node
+      - TERM=xterm-256color
+      - OPENCLAW_STATE_DIR=/home/node/.openclaw
+    binds:
+      - /lzcapp/var/openclaw-data:/home/node/.openclaw
+      - /lzcapp/var/openclaw-workspace:/home/node/clawd
+      - /lzcapp/var/openclaw-app:/app
+    command: "gateway --bind lan --port 18789"
+    healthcheck:
+      test: ["CMD", "node", "dist/index.js", "health", "--json"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+locales:
+  zh:
+    name: "OpenClaw"
+    description: "真正能做事的AI Agent"
+    usage: |
+      ## 首次使用
+
+      1. 在 Overview 界面配置 Token，默认密码是 `admin`
+      2. 配置大模型 API（支持 Claude、OpenAI 等）
+
+      ## 功能特性
+
+      - Web UI 控制面板
+      - Canvas 网页生成与托管
+      - 浏览器自动化
+      - 多渠道消息支持（Telegram、Discord、Slack 等）
+      - 自定义 Skills 扩展
+
+      ## 目录说明
+
+      - `/home/node/.openclaw` - 配置与数据目录
+      - `/home/node/clawd` - 工作空间（AGENTS.md、skills、canvas）
+
+      如需帮助请联系 VIP 群。
+  en:
+    name: "OpenClaw"
+    description: "AI Agent that actually gets things done"
+    usage: |
+      ## First-time Setup
+
+      1. Configure the Token on the Overview page (default password: `admin`)
+      2. Set up your LLM API (supports Claude, OpenAI, etc.)
+
+      ## Features
+
+      - Web UI control panel
+      - Canvas webpage generation and hosting
+      - Browser automation
+      - Multi-channel messaging (Telegram, Discord, Slack, etc.)
+      - Custom Skills extensions
+
+      ## Directory Structure
+
+      - `/home/node/.openclaw` - Configuration and data directory
+      - `/home/node/clawd` - Workspace (AGENTS.md, skills, canvas)
+
+      For help, please contact the VIP group.
