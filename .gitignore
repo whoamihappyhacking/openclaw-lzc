@@ -121,3 +121,7 @@ dist/protocol.schema.json
 
 # Synthing
 **/.stfolder/
+
+*.lpk
+/data/
+/moltbot-chorme-exntension.zip
