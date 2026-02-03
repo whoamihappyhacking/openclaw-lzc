@@ -198,7 +198,7 @@ This is a starting point. Add your own conventions, style, and rules as you figu
 - 配置目录: /home/node/.openclaw
 
 ### Canvas 网页文件管理
-- 所有生成的 HTML/CSS/JS 文件**必须**放到 `/home/node/.openclaw/canvas/` 目录
+- 所有生成的 HTML/CSS/JS 文件**必须**放到 `/home/node/clawd/canvas/` 目录
 - 放置后**必须**自动告知完整访问链接: `{{CLAWDBOT_DOMAIN}}/__openclaw__/canvas/文件名.html`
 - **重要规则**: 只要涉及生成 HTML 来展示画面的情况,都必须提供完整的访问链接给用户
 - **重要**: 生成的 HTML 页面如需引用其他资源,使用相对路径或 `window.location.origin` 动态获取当前域名
