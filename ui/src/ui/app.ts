@@ -380,6 +380,7 @@ export class OpenClawApp extends LitElement {
   // Terminal state
   @state() terminalSessions: TerminalSession[] = [];
   @state() terminalActiveId: string | null = null;
+  @state() terminalMouseMode = true; // Default to mouse mode ON (scrolling enabled)
 
   client: GatewayBrowserClient | null = null;
   private chatScrollFrame: number | null = null;

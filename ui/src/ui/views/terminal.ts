@@ -7,10 +7,12 @@ export type TerminalProps = {
   connected: boolean;
   sessions: TerminalSession[];
   activeId: string | null;
+  mouseMode: boolean;
   onCreateSession: () => void;
   onCloseSession: (id: string) => void;
   onSwitchSession: (id: string) => void;
   onMount: (id: string, container: HTMLElement) => void;
+  onToggleMouseMode: () => void;
 };
 
 function handleTabClose(e: Event, props: TerminalProps, id: string) {
@@ -38,7 +40,7 @@ export function cleanupTerminalMount(id: string) {
 }
 
 export function renderTerminal(props: TerminalProps) {
-  const { sessions, activeId, connected } = props;
+  const { sessions, activeId, connected, mouseMode } = props;
 
   // Schedule mount for active terminal after render
   if (activeId && connected) {
@@ -76,15 +78,29 @@ export function renderTerminal(props: TerminalProps) {
             +
           </button>
         </div>
+        <div class="terminal-toolbar">
+          <button
+            class="terminal-toggle ${mouseMode ? "terminal-toggle--active" : ""}"
+            @click=${props.onToggleMouseMode}
+            ?disabled=${!connected || sessions.length === 0}
+            title="${mouseMode ? "Mouse mode ON (scroll works, hold Shift to select)" : "Mouse mode OFF (select works, scroll disabled)"}"
+          >
+            ${icons.mousePointer ?? icons.monitor}
+            <span>${mouseMode ? "Scroll" : "Select"}</span>
+          </button>
+        </div>
       </div>
 
       <!-- Command hint banner -->
       <div class="terminal-hint">
         <div class="terminal-hint__icon">${icons.zap}</div>
         <div class="terminal-hint__content">
-          <strong>Tip:</strong> Use <code>node dist/index.js</code> instead of <code>clawdbot</code> command inside the container.
+          <strong>提示:</strong> 在容器内使用 <code>openclaw</code> 命令。例如: <code>openclaw --help</code>
           <br>
-          Example: <code>node dist/index.js --help</code>
+          <strong>鼠标:</strong> ${mouseMode
+            ? html`滚动已启用。按住 <code>Shift</code> 拖动可选择文本。`
+            : html`选择已启用。点击 <code>滚动</code> 按钮启用滚动。`}
+          <strong>复制/粘贴:</strong> <code>Ctrl+Shift+C</code> / <code>Ctrl+Shift+V</code>
         </div>
       </div>
 
@@ -122,7 +138,46 @@ export function renderTerminal(props: TerminalProps) {
       }
       .terminal-header {
         flex-shrink: 0;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
         border-bottom: 1px solid var(--border);
+      }
+      .terminal-toolbar {
+        padding: 8px;
+      }
+      .terminal-toggle {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 12px;
+        border: 1px solid var(--border);
+        background: var(--bg-secondary);
+        color: var(--text-secondary);
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 12px;
+        transition: all 0.15s;
+      }
+      .terminal-toggle:hover:not(:disabled) {
+        background: var(--bg-tertiary);
+        color: var(--text-primary);
+      }
+      .terminal-toggle--active {
+        background: #3b82f620;
+        border-color: #3b82f6;
+        color: #3b82f6;
+      }
+      .terminal-toggle:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      .terminal-toggle svg {
+        width: 14px;
+        height: 14px;
+        stroke: currentColor;
+        stroke-width: 2;
+        fill: none;
       }
       .terminal-hint {
         display: flex;

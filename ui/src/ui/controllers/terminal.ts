@@ -8,6 +8,7 @@ import { cleanupTerminalMount } from "../views/terminal.ts";
 export type TerminalState = {
   terminalSessions: TerminalSession[];
   terminalActiveId: string | null;
+  terminalMouseMode: boolean;
 };
 
 type TerminalInstance = {
@@ -142,12 +143,27 @@ export async function mountTerminal(
     letterSpacing: 0,
     scrollback: 10000,
     rightClickSelectsWord: true,
+    allowProposedApi: true,
     theme: {
       background: "#1a1a1a",
       foreground: "#e0e0e0",
       cursor: "#f0f0f0",
       selectionBackground: "#444444",
     },
+  });
+
+  // Attach selection manager to enable mouse selection
+  terminal.attachCustomKeyEventHandler((event) => {
+    // Allow Shift+Click for selection, Ctrl+Shift+C/V for copy/paste
+    if (event.shiftKey && (event.type === "keydown" || event.type === "keyup")) {
+      if (event.key === "C" && event.ctrlKey) {
+        return false; // Let our handler deal with it
+      }
+      if (event.key === "V" && event.ctrlKey) {
+        return false; // Let our handler deal with it
+      }
+    }
+    return true;
   });
 
   const fitAddon = new FitAddon();
@@ -285,5 +301,20 @@ export function getTerminalInstance(id: string): TerminalInstance | undefined {
 export function disposeAllTerminals(state: TerminalState): void {
   for (const [id] of instances) {
     closeTerminalSession(state, id);
+  }
+}
+
+// Toggle tmux mouse mode for scrolling vs selecting
+export function toggleTerminalMouseMode(state: TerminalState): void {
+  const newMode = !state.terminalMouseMode;
+  state.terminalMouseMode = newMode;
+
+  // Send mouse mode command to all active terminals
+  for (const [, instance] of instances) {
+    if (instance.ws && instance.ws.readyState === WebSocket.OPEN) {
+      // Send tmux command to toggle mouse mode
+      const cmd = newMode ? "set -g mouse on" : "set -g mouse off";
+      instance.ws.send(JSON.stringify({ type: "input", data: `tmux ${cmd}\r` }));
+    }
   }
 }
