@@ -25,6 +25,7 @@ RUN apt-get update && \
     unzip \
     tmux \
     sudo \
+    git \
     libappindicator3-1 \
     libasound2 \
     libatk-bridge2.0-0 \
@@ -56,11 +57,11 @@ RUN if [ -n "$CLAWDBOT_DOCKER_APT_PACKAGES" ]; then \
       rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*; \
     fi
 
-# ========== 代码放到 /app-image（只读模板） ==========
-WORKDIR /app-image
+# ========== 复制代码到全局安装目录 ==========
+WORKDIR /usr/local/lib/node_modules/openclaw
 
 # 复制 package.json 等配置文件
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc openclaw.mjs ./
 COPY ui/package.json ./ui/package.json
 COPY patches ./patches
 
@@ -71,34 +72,36 @@ COPY ui/node_modules ./ui/node_modules
 # 复制源码和构建产物
 COPY src ./src
 COPY dist ./dist
-COPY docs/reference/templates ./docs/reference/templates
+COPY docs ./docs
 COPY extensions ./extensions
+COPY skills ./skills
+COPY assets ./assets
+COPY git-hooks ./git-hooks
+COPY scripts/postinstall.js scripts/setup-git-hooks.js scripts/format-staged.js ./scripts/
 
-# 运行目录是 /app（会被持久化挂载覆盖）
-WORKDIR /app
+# 创建命令链接
+RUN ln -sf /usr/local/lib/node_modules/openclaw/openclaw.mjs /usr/local/bin/openclaw
+
+# ========== 配置运行环境 ==========
+WORKDIR /home/node
 
 ENV NODE_ENV=production
-# 数据目录 - 使用 openclaw 标准路径
 ENV OPENCLAW_STATE_DIR=/home/node/.openclaw
 
-# ========== 配置用户 ==========
+# 配置用户权限
 RUN echo "node ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers && \
     mkdir -p /home/node/.openclaw && \
-    chown -R node:node /home/node /app-image
+    chown -R node:node /home/node
 
-WORKDIR /app
-
-# 配置 tmux 启用鼠标支持
-RUN mkdir -p /home/node && printf '%s\n' \
+# 配置 tmux (默认启用鼠标模式支持滚动，可通过 UI 切换)
+RUN printf '%s\n' \
     'set -g mouse on' \
     'set -g history-limit 50000' \
     'set -g default-terminal "xterm-256color"' \
     > /home/node/.tmux.conf
 
-# 复制预配置的 workspace 文件到临时位置 (备份,用于初始化 bind mount)
+# 复制预配置的 workspace 文件
 COPY --chown=node:node docker-workspace/ /opt/clawd-template/
-
-# 同时复制一份到默认位置 (如果不使用 bind mount 时直接使用)
 COPY --chown=node:node docker-workspace/ /home/node/clawd/
 
 # 添加启动脚本
@@ -106,58 +109,22 @@ COPY --chmod=755 <<'EOF' /usr/local/bin/clawdbot-entrypoint.sh
 #!/bin/bash
 set -e
 
-# ========== App 持久化逻辑 ==========
-APP_IMAGE="/app-image"
-APP_LIVE="/app"
-VERSION_FILE="$APP_LIVE/.openclaw-version"
-
-# 从 package.json 提取版本
-get_image_version() {
-  grep '"version"' "$APP_IMAGE/package.json" | head -1 | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/'
-}
-
-IMAGE_VERSION=$(get_image_version)
-
-# 首次启动：复制代码
-if [ ! -f "$APP_LIVE/package.json" ]; then
-  echo "[openclaw] First run, copying app from image..."
-  cp -r "$APP_IMAGE/"* "$APP_LIVE/"
-  echo "$IMAGE_VERSION" > "$VERSION_FILE"
-  echo "[openclaw] App initialized (version: $IMAGE_VERSION)"
-fi
-
-# 版本检测（提示更新）
-if [ -f "$VERSION_FILE" ]; then
-  CURRENT_VERSION=$(cat "$VERSION_FILE")
-  if [ "$CURRENT_VERSION" != "$IMAGE_VERSION" ]; then
-    echo "[openclaw] =================================================="
-    echo "[openclaw] New version available: $IMAGE_VERSION"
-    echo "[openclaw] Current version: $CURRENT_VERSION"
-    echo "[openclaw] To update, run: rm -rf /app/* && restart container"
-    echo "[openclaw] =================================================="
-  fi
-fi
-
-# 配置目录 - 使用标准 openclaw 路径
+# 配置目录
 CONFIG_DIR="${OPENCLAW_STATE_DIR:-/home/node/.openclaw}"
 CONFIG_FILE="${CONFIG_DIR}/openclaw.json"
 AGENTS_MD="/home/node/clawd/AGENTS.md"
 
-# 设置标准环境变量
 export OPENCLAW_STATE_DIR="$CONFIG_DIR"
 
-# 修复挂载卷权限 - 统一用 root,不切换用户
 echo "[openclaw] Running as root user..."
 
-# 初始化 workspace (如果使用 bind mount 且为空,则从模板复制)
+# 初始化 workspace
 init_workspace() {
   local workspace_dir="/home/node/clawd"
   local template_dir="/opt/clawd-template"
 
-  # 检查 workspace 是否为空或只有 .git 目录
   if [ ! -f "$workspace_dir/AGENTS.md" ]; then
     echo "[openclaw] Initializing workspace from template..."
-    # 复制所有文件,但跳过已存在的
     cp -rn "$template_dir/"* "$workspace_dir/" 2>/dev/null || true
     echo "[openclaw] Workspace initialized"
   else
@@ -170,37 +137,29 @@ update_agents_domain() {
   local raw_domain="${LAZYCAT_APP_DOMAIN:-localhost:18789}"
   local domain=""
 
-  # 自动添加协议头
   if [[ "$raw_domain" == localhost* ]] || [[ "$raw_domain" == 127.0.0.1* ]]; then
-    # localhost 使用 http
     domain="http://${raw_domain}"
   else
-    # 其他域名使用 https
     domain="https://${raw_domain}"
   fi
 
   echo "[openclaw] Updating AGENTS.md with domain: $domain"
 
-  # 替换 AGENTS.md 中的域名占位符
   if [ -f "$AGENTS_MD" ]; then
     sed -i "s|{{CLAWDBOT_DOMAIN}}|${domain}|g" "$AGENTS_MD"
   fi
 }
 
-# 初始化配置 - 只在配置文件不存在时生成
+# 初始化配置
 init_config() {
-  # 如果配置已存在,跳过
   if [ -f "$CONFIG_FILE" ]; then
     echo "[openclaw] Configuration exists at $CONFIG_FILE"
     return 0
   fi
 
   echo "[openclaw] Generating initial configuration..."
-
-  # 确保配置目录存在
   mkdir -p "$CONFIG_DIR"
 
-  # 生成 openclaw.json
   cat > "$CONFIG_FILE" <<CFGEOF
 {
   "models": {
@@ -250,7 +209,8 @@ init_config() {
   "gateway": {
     "mode": "local",
     "controlUi": {
-      "allowInsecureAuth": true
+      "allowInsecureAuth": true,
+      "injectToken": true
     },
     "auth": {
       "mode": "token",
@@ -273,24 +233,24 @@ CFGEOF
   echo "[openclaw] Initial configuration created at $CONFIG_FILE"
 }
 
+# 显示版本
+echo "[openclaw] Version: $(openclaw --version 2>/dev/null || echo 'unknown')"
+echo "[openclaw] Use 'openclaw update' to update"
+
 # 默认命令
 CMD="${1:-gateway}"
 
 case "$CMD" in
   gateway)
-    # Gateway 模式：初始化 workspace、更新域名、初始化配置后以 root 运行
     init_workspace
     update_agents_domain
     init_config
-    cd "$APP_LIVE"
-    exec node dist/index.js "$@"
+    exec openclaw "$@"
     ;;
   *)
-    # 普通 CLI 模式: 初始化 workspace、更新域名、以 root 运行
     init_workspace
     update_agents_domain
-    cd "$APP_LIVE"
-    exec node dist/index.js "$@"
+    exec openclaw "$@"
     ;;
 esac
 EOF

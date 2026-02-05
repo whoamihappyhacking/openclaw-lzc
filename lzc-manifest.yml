@@ -1,5 +1,5 @@
 package: iamxiaoe.lzcapp.openclaw
-version: 1.0.0
+version: 1.0.1
 name: OpenClaw
 description: 真正能做事的AI Agent
 author: https://openclaw.ai
@@ -12,7 +12,7 @@ application:
       port: 18789
       services: openclaw
     - protocol: tcp
-      port: 18782
+      port: 18792
       services: openclaw
     - protocol: tcp
       port: 18800
@@ -20,7 +20,7 @@ application:
 
 services:
   openclaw:
-    image: registry.lazycat.cloud/openclaw:1.0.0
+    image: registry.lazycat.cloud/openclaw:1.0.1
     dns:
       - 8.8.8.8
       - 8.8.4.4
@@ -34,7 +34,7 @@ services:
       - /lzcapp/var/openclaw-app:/app
     command: "gateway --bind lan --port 18789"
     healthcheck:
-      test: ["CMD", "node", "dist/index.js", "health", "--json"]
+      test: ["CMD", "openclaw", "health", "--json"]
       interval: 30s
       timeout: 10s
       retries: 3
