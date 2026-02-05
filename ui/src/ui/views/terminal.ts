@@ -1,5 +1,4 @@
 import { html } from "lit";
-
 import type { TerminalSession } from "../ui-types.ts";
 import { icons } from "../icons.ts";
 
@@ -24,8 +23,7 @@ function handleTabClose(e: Event, props: TerminalProps, id: string) {
 const mountedTerminals = new Set<string>();
 
 function scheduleMount(props: TerminalProps, id: string) {
-  if (mountedTerminals.has(id)) return;
-
+  // Always schedule a mount check - the controller will handle deduplication
   requestAnimationFrame(() => {
     const container = document.querySelector(`[data-terminal-id="${id}"]`) as HTMLElement | null;
     if (container) {
@@ -85,7 +83,7 @@ export function renderTerminal(props: TerminalProps) {
             ?disabled=${!connected || sessions.length === 0}
             title="${mouseMode ? "Mouse mode ON (scroll works, hold Shift to select)" : "Mouse mode OFF (select works, scroll disabled)"}"
           >
-            ${icons.mousePointer ?? icons.monitor}
+            ${icons.monitor}
             <span>${mouseMode ? "Scroll" : "Select"}</span>
           </button>
         </div>
@@ -97,9 +95,15 @@ export function renderTerminal(props: TerminalProps) {
         <div class="terminal-hint__content">
           <strong>提示:</strong> 在容器内使用 <code>openclaw</code> 命令。例如: <code>openclaw --help</code>
           <br>
-          <strong>鼠标:</strong> ${mouseMode
-            ? html`滚动已启用。按住 <code>Shift</code> 拖动可选择文本。`
-            : html`选择已启用。点击 <code>滚动</code> 按钮启用滚动。`}
+          <strong>鼠标:</strong> ${
+            mouseMode
+              ? html`
+                  滚动已启用。按住 <code>Shift</code> 拖动可选择文本。
+                `
+              : html`
+                  选择已启用。点击 <code>滚动</code> 按钮启用滚动。
+                `
+          }
           <strong>复制/粘贴:</strong> <code>Ctrl+Shift+C</code> / <code>Ctrl+Shift+V</code>
         </div>
       </div>
