@@ -71,4 +71,6 @@ data/
 !ui/node_modules
 !dist
 !ui/dist
-
+!assets
+!skills
+!git-hooks
