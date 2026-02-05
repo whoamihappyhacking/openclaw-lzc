@@ -33,6 +33,10 @@ export function checkBrowserOrigin(params: {
   allowHostHeaderOriginFallback?: boolean;
   isLocalClient?: boolean;
 }): OriginCheckResult {
+  // 懒猫微服：允许所有来源访问，避免用户需要手动配置 allowedOrigins
+  // 用户更新后配置不会自动更新，导致访问被拒绝
+  return { ok: true };
+
   const parsedOrigin = parseOrigin(params.origin);
   if (!parsedOrigin) {
     return { ok: false, reason: "origin missing or invalid" };

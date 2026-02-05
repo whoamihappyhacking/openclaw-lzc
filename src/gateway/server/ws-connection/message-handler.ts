@@ -537,9 +537,18 @@ export function attachGatewayWsMessageHandler(params: {
         const hasTokenAuth = Boolean(connectParams.auth?.token);
         const hasPasswordAuth = Boolean(connectParams.auth?.password);
         const hasSharedAuth = hasTokenAuth || hasPasswordAuth;
+        const controlUiConfig = configSnapshot.gateway?.controlUi;
+        // 懒猫微服：默认禁用设备认证，避免用户需要手动配置
+        const effectiveControlUiConfig = isControlUi
+          ? {
+              ...controlUiConfig,
+              dangerouslyDisableDeviceAuth:
+                controlUiConfig?.dangerouslyDisableDeviceAuth ?? true,
+            }
+          : controlUiConfig;
         const controlUiAuthPolicy = resolveControlUiAuthPolicy({
           isControlUi,
-          controlUiConfig: configSnapshot.gateway?.controlUi,
+          controlUiConfig: effectiveControlUiConfig,
           deviceRaw,
         });
         const device = controlUiAuthPolicy.device;
