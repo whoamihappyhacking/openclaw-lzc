@@ -630,6 +630,16 @@ async function maybeRestartService(params: {
 export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
   suppressDeprecations();
 
+  // 懒猫微服环境提示：更新到官方最新版后，懒猫定制能力会被覆盖。
+  if (process.env.LAZYCAT_APP_DOMAIN || process.env.NPM_CONFIG_PREFIX === "/app/npm-global") {
+    defaultRuntime.log("");
+    defaultRuntime.log("⚠️  懒猫微服环境检测到");
+    defaultRuntime.log("   更新后将同步官方 OpenClaw 最新版本，以下懒猫定制功能会消失：");
+    defaultRuntime.log("   • Web Terminal 终端面板");
+    defaultRuntime.log("   如需恢复定制功能，请VIP群催更小E更新懒猫应用镜像。");
+    defaultRuntime.log("");
+  }
+
   const timeoutMs = parseTimeoutMsOrExit(opts.timeout);
   const shouldRestart = opts.restart !== false;
   if (timeoutMs === null) {
