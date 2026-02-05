@@ -1,3 +1,14 @@
+# ========== 构建 Tower 守护进程 ==========
+FROM golang:1.22-bookworm AS tower-builder
+
+WORKDIR /build
+COPY openclaw-tower/ .
+
+# 使用国内代理
+ENV GOPROXY=https://goproxy.cn,direct
+RUN go build -ldflags="-s -w" -o tower .
+
+# ========== 主镜像 ==========
 FROM node:22-bookworm
 
 # 配置清华源
@@ -28,6 +39,7 @@ RUN apt-get update && \
     sudo \
     git \
     jq \
+    vim \
     libappindicator3-1 \
     libasound2 \
     libatk-bridge2.0-0 \
@@ -113,6 +125,10 @@ RUN printf '%s\n' \
     'set -g default-terminal "xterm-256color"' \
     > /home/node/.tmux.conf
 
+# ========== 复制 Tower 守护进程 ==========
+COPY --from=tower-builder /build/tower /usr/local/bin/tower
+RUN chmod +x /usr/local/bin/tower
+
 # 复制预配置的 workspace 文件
 COPY --chown=node:node docker-workspace/ /opt/clawd-template/
 COPY --chown=node:node docker-workspace/ /home/node/clawd/
@@ -194,10 +210,35 @@ update_agents_domain() {
   fi
 }
 
+# 自动备份配置（每次启动时）
+backup_config() {
+  local backup_dir="${CONFIG_DIR}/backups"
+  local backup_file="${backup_dir}/openclaw.json.$(date +%Y%m%d_%H%M%S)"
+  local latest_backup="${CONFIG_DIR}/openclaw.json.bak"
+
+  if [ ! -f "$CONFIG_FILE" ]; then
+    return 0
+  fi
+
+  mkdir -p "$backup_dir"
+
+  # 复制到带时间戳的备份
+  cp "$CONFIG_FILE" "$backup_file"
+  echo "[openclaw] Config backed up to: $backup_file"
+
+  # 同时更新最新备份（供恢复按钮使用）
+  cp "$CONFIG_FILE" "$latest_backup"
+
+  # 保留最近10个备份
+  ls -1t "$backup_dir"/openclaw.json.* 2>/dev/null | tail -n +11 | xargs -r rm -f
+}
+
 # 初始化配置
 init_config() {
   if [ -f "$CONFIG_FILE" ]; then
     echo "[openclaw] Configuration exists at $CONFIG_FILE"
+    # 自动备份现有配置
+    backup_config
     return 0
   fi
 
@@ -293,7 +334,16 @@ case "$CMD" in
     init_workspace
     update_agents_domain
     init_config
-    exec openclaw "$@"
+    # 启动 Tower 守护进程，它会内部启动 OpenClaw 并提供健康监控和恢复界面
+    exec /usr/local/bin/tower --port 18800 --openclaw-port 18789 --config "$CONFIG_FILE"
+    ;;
+  tower)
+    # 直接启动 tower（用于调试）
+    init_workspace
+    update_agents_domain
+    init_config
+    shift
+    exec /usr/local/bin/tower "$@"
     ;;
   *)
     init_workspace
@@ -303,9 +353,9 @@ case "$CMD" in
 esac
 EOF
 
+EXPOSE 18800
 EXPOSE 18789
 EXPOSE 18792
-EXPOSE 18800
 
-CMD ["gateway", "--bind", "lan", "--port", "18789"]
+CMD ["gateway"]
 ENTRYPOINT ["/usr/local/bin/clawdbot-entrypoint.sh"]
