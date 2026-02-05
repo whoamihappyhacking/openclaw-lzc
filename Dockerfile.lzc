@@ -21,11 +21,13 @@ RUN apt-get update && \
     fonts-noto-cjk \
     fonts-wqy-microhei \
     fonts-wqy-zenhei \
+    locales \
     wget \
     unzip \
     tmux \
     sudo \
     git \
+    jq \
     libappindicator3-1 \
     libasound2 \
     libatk-bridge2.0-0 \
@@ -45,6 +47,12 @@ RUN apt-get update && \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
+# 配置中文 locale
+RUN sed -i '/zh_CN.UTF-8/s/^# //g' /etc/locale.gen && \
+    locale-gen zh_CN.UTF-8
+ENV LANG=zh_CN.UTF-8
+ENV LC_ALL=zh_CN.UTF-8
+
 # 设置 Chromium 路径环境变量
 ENV CHROMIUM_PATH=/usr/bin/chromium
 
@@ -57,8 +65,8 @@ RUN if [ -n "$CLAWDBOT_DOCKER_APT_PACKAGES" ]; then \
       rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*; \
     fi
 
-# ========== 复制代码到全局安装目录 ==========
-WORKDIR /usr/local/lib/node_modules/openclaw
+# ========== 复制代码到模板目录（只读，用于初始化） ==========
+WORKDIR /opt/openclaw-image
 
 # 复制 package.json 等配置文件
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc openclaw.mjs ./
@@ -77,10 +85,10 @@ COPY extensions ./extensions
 COPY skills ./skills
 COPY assets ./assets
 COPY git-hooks ./git-hooks
-COPY scripts/postinstall.js scripts/setup-git-hooks.js scripts/format-staged.js ./scripts/
 
-# 创建命令链接
-RUN ln -sf /usr/local/lib/node_modules/openclaw/openclaw.mjs /usr/local/bin/openclaw
+# 设置 npm 全局安装目录到持久化卷
+ENV NPM_CONFIG_PREFIX=/app/npm-global
+ENV PATH=/app/npm-global/bin:$PATH
 
 # ========== 配置运行环境 ==========
 WORKDIR /home/node
@@ -92,6 +100,11 @@ ENV OPENCLAW_STATE_DIR=/home/node/.openclaw
 RUN echo "node ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers && \
     mkdir -p /home/node/.openclaw && \
     chown -R node:node /home/node
+
+# 配置 PATH 让所有 shell 会话都能使用 openclaw 命令
+RUN echo 'export NPM_CONFIG_PREFIX=/app/npm-global' > /etc/profile.d/openclaw.sh && \
+    echo 'export PATH=/app/npm-global/bin:$PATH' >> /etc/profile.d/openclaw.sh && \
+    chmod +x /etc/profile.d/openclaw.sh
 
 # 配置 tmux (默认启用鼠标模式支持滚动，可通过 UI 切换)
 RUN printf '%s\n' \
@@ -109,14 +122,45 @@ COPY --chmod=755 <<'EOF' /usr/local/bin/clawdbot-entrypoint.sh
 #!/bin/bash
 set -e
 
-# 配置目录
+# ========== 路径配置 ==========
+IMAGE_DIR="/opt/openclaw-image"
+NPM_GLOBAL="/app/npm-global"
+OPENCLAW_DIR="$NPM_GLOBAL/lib/node_modules/openclaw"
+OPENCLAW_BIN="$NPM_GLOBAL/bin/openclaw"
+
 CONFIG_DIR="${OPENCLAW_STATE_DIR:-/home/node/.openclaw}"
 CONFIG_FILE="${CONFIG_DIR}/openclaw.json"
 AGENTS_MD="/home/node/clawd/AGENTS.md"
 
 export OPENCLAW_STATE_DIR="$CONFIG_DIR"
+export NPM_CONFIG_PREFIX="$NPM_GLOBAL"
+export PATH="$NPM_GLOBAL/bin:$PATH"
 
 echo "[openclaw] Running as root user..."
+
+# ========== 初始化 openclaw 到持久化卷 ==========
+init_openclaw() {
+  # 从镜像获取版本
+  local image_version=$(grep '"version"' "$IMAGE_DIR/package.json" | head -1 | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+
+  if [ ! -f "$OPENCLAW_DIR/package.json" ]; then
+    echo "[openclaw] First run, initializing from image (v$image_version)..."
+    mkdir -p "$NPM_GLOBAL/lib/node_modules" "$NPM_GLOBAL/bin"
+    cp -r "$IMAGE_DIR" "$OPENCLAW_DIR"
+    ln -sf "$OPENCLAW_DIR/openclaw.mjs" "$OPENCLAW_BIN"
+    echo "[openclaw] Initialized successfully"
+  else
+    # 检查版本
+    local current_version=$(grep '"version"' "$OPENCLAW_DIR/package.json" | head -1 | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+    echo "[openclaw] Current version: $current_version (image: $image_version)"
+
+    # 确保 bin 链接存在
+    if [ ! -f "$OPENCLAW_BIN" ]; then
+      mkdir -p "$NPM_GLOBAL/bin"
+      ln -sf "$OPENCLAW_DIR/openclaw.mjs" "$OPENCLAW_BIN"
+    fi
+  fi
+}
 
 # 初始化 workspace
 init_workspace() {
@@ -208,9 +252,12 @@ init_config() {
   },
   "gateway": {
     "mode": "local",
+    "trustedProxies": ["0.0.0.0/0", "::/0"],
     "controlUi": {
       "allowInsecureAuth": true,
-      "injectToken": true
+      "dangerouslyDisableDeviceAuth": true,
+      "injectToken": true,
+      "allowedOrigins": ["*"]
     },
     "auth": {
       "mode": "token",
@@ -234,8 +281,9 @@ CFGEOF
 }
 
 # 显示版本
+init_openclaw
 echo "[openclaw] Version: $(openclaw --version 2>/dev/null || echo 'unknown')"
-echo "[openclaw] Use 'openclaw update' to update"
+echo "[openclaw] Use 'openclaw update' to update (changes persist across restarts)"
 
 # 默认命令
 CMD="${1:-gateway}"
@@ -256,7 +304,7 @@ esac
 EOF
 
 EXPOSE 18789
-EXPOSE 18782
+EXPOSE 18792
 EXPOSE 18800
 
 CMD ["gateway", "--bind", "lan", "--port", "18789"]
