@@ -95,6 +95,7 @@ import {
   createTerminalSession,
   closeTerminalSession,
   mountTerminal,
+  toggleTerminalMouseMode,
 } from "./controllers/terminal.ts";
 
 const AVATAR_DATA_RE = /^data:/i;
@@ -864,10 +865,12 @@ export function renderApp(state: AppViewState) {
                 connected: state.connected,
                 sessions: state.terminalSessions,
                 activeId: state.terminalActiveId,
+                mouseMode: state.terminalMouseMode,
                 onCreateSession: () => createTerminalSession(state),
                 onCloseSession: (id) => closeTerminalSession(state, id),
                 onSwitchSession: (id) => (state.terminalActiveId = id),
                 onMount: (id, container) => void mountTerminal(id, container, state.settings.token),
+                onToggleMouseMode: () => toggleTerminalMouseMode(state),
               })
             : nothing
         }

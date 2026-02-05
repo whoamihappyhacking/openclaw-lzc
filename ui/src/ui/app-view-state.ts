@@ -257,6 +257,7 @@ export type AppViewState = {
     logsAtBottom: boolean;
     terminalSessions: TerminalSession[];
     terminalActiveId: string | null;
+    terminalMouseMode: boolean;
     updateAvailable: import("./types.js").UpdateAvailable | null;
     client: GatewayBrowserClient | null;
     refreshSessionsAfterChat: Set<string>;
