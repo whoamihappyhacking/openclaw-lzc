@@ -82,6 +82,7 @@ WORKDIR /opt/openclaw-image
 
 # 复制 package.json 等配置文件
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc openclaw.mjs ./
+COPY openclaw-tower/internal/web/default-config.json ./default-config.json
 COPY ui/package.json ./ui/package.json
 COPY patches ./patches
 
@@ -170,6 +171,9 @@ init_openclaw() {
     local current_version=$(grep '"version"' "$OPENCLAW_DIR/package.json" | head -1 | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
     echo "[openclaw] Current version: $current_version (image: $image_version)"
 
+    # 注意: dist/entry.js 完整性检查已移至 Tower 守护进程
+    # Tower 会在启动时检测并修复损坏的安装，用户可在修复界面看到进度
+
     # 确保 bin 链接存在
     if [ ! -f "$OPENCLAW_BIN" ]; then
       mkdir -p "$NPM_GLOBAL/bin"
@@ -245,78 +249,7 @@ init_config() {
   echo "[openclaw] Generating initial configuration..."
   mkdir -p "$CONFIG_DIR"
 
-  cat > "$CONFIG_FILE" <<CFGEOF
-{
-  "models": {
-    "mode": "merge",
-    "providers": {
-      "Anthropic Claude": {
-        "baseUrl": "https://axy5920-cliproxyapi.hf.space/v1",
-        "api": "openai-completions",
-        "auth": "token",
-        "authHeader": true,
-        "models": [
-          {
-            "id": "gemini-claude-sonnet-4-5",
-            "name": "gemini-claude-sonnet-4-5",
-            "api": "openai-completions",
-            "reasoning": true,
-            "input": [
-              "text"
-            ],
-            "contextWindow": 25000000,
-            "maxTokens": 4096
-          }
-        ],
-        "apiKey": "获取Key请VIP群联系"
-      }
-    }
-  },
-  "agents": {
-    "defaults": {
-      "workspace": "/home/node/clawd",
-      "maxConcurrent": 4,
-      "subagents": {
-        "maxConcurrent": 8
-      },
-      "model": {
-        "primary": "Anthropic Claude/gemini-claude-sonnet-4-5"
-      }
-    }
-  },
-  "commands": {
-    "native": "auto",
-    "nativeSkills": "auto"
-  },
-  "messages": {
-    "ackReactionScope": "group-mentions"
-  },
-  "gateway": {
-    "mode": "local",
-    "trustedProxies": ["0.0.0.0/0", "::/0"],
-    "controlUi": {
-      "allowInsecureAuth": true,
-      "dangerouslyDisableDeviceAuth": true,
-      "injectToken": true,
-      "allowedOrigins": ["*"]
-    },
-    "auth": {
-      "mode": "token",
-      "token": "admin"
-    }
-  },
-  "canvasHost": {
-    "root": "/home/node/clawd/canvas"
-  },
-  "browser": {
-    "enabled": true,
-    "headless": true,
-    "noSandbox": true,
-    "defaultProfile": "clawd",
-    "executablePath": "/usr/bin/chromium"
-  }
-}
-CFGEOF
+  cat "$IMAGE_DIR/default-config.json" > "$CONFIG_FILE"
   chmod 600 "$CONFIG_FILE"
   echo "[openclaw] Initial configuration created at $CONFIG_FILE"
 }
