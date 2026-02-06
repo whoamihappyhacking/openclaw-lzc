@@ -7,9 +7,19 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
+)
+
+const (
+	// OpenClaw installation paths
+	ImageDir       = "/opt/openclaw-image"
+	NPMGlobal      = "/app/npm-global"
+	OpenClawDir    = NPMGlobal + "/lib/node_modules/openclaw"
+	OpenClawBin    = NPMGlobal + "/bin/openclaw"
+	EntryJSPath    = OpenClawDir + "/dist/entry.js"
 )
 
 type Status string
@@ -50,6 +60,9 @@ func New(cfg Config) *Monitor {
 }
 
 func (m *Monitor) Start() {
+	// Check installation integrity before starting
+	m.checkAndRepairInstallation()
+
 	// Initial startup
 	m.startOpenClaw()
 
@@ -60,6 +73,76 @@ func (m *Monitor) Start() {
 	for range ticker.C {
 		m.checkHealth()
 	}
+}
+
+// checkAndRepairInstallation checks if OpenClaw installation is intact
+// and repairs it from the image if corrupted
+func (m *Monitor) checkAndRepairInstallation() {
+	m.addLog("[tower] Checking OpenClaw installation integrity...")
+
+	// Check if entry.js exists
+	if _, err := os.Stat(EntryJSPath); err == nil {
+		m.addLog("[tower] Installation OK: dist/entry.js found")
+		return
+	}
+
+	m.addLog("[tower] WARNING: dist/entry.js missing, installation corrupted!")
+	m.addLog("[tower] Reinstalling OpenClaw from image...")
+
+	// Set status to show we're repairing
+	m.mu.Lock()
+	m.status = StatusStarting
+	m.lastError = "Installation corrupted, reinstalling..."
+	m.mu.Unlock()
+
+	// Remove corrupted installation
+	if err := os.RemoveAll(OpenClawDir); err != nil {
+		m.addLog(fmt.Sprintf("[tower] Failed to remove corrupted installation: %v", err))
+		m.mu.Lock()
+		m.status = StatusCrashed
+		m.lastError = fmt.Sprintf("Failed to remove corrupted installation: %v", err)
+		m.crashCount++
+		m.mu.Unlock()
+		return
+	}
+
+	// Copy from image
+	if err := m.copyDir(ImageDir, OpenClawDir); err != nil {
+		m.addLog(fmt.Sprintf("[tower] Failed to copy from image: %v", err))
+		m.mu.Lock()
+		m.status = StatusCrashed
+		m.lastError = fmt.Sprintf("Failed to reinstall: %v", err)
+		m.crashCount++
+		m.mu.Unlock()
+		return
+	}
+
+	// Recreate symlink
+	os.MkdirAll(filepath.Dir(OpenClawBin), 0755)
+	os.Remove(OpenClawBin) // Remove old symlink if exists
+	if err := os.Symlink(OpenClawDir+"/openclaw.mjs", OpenClawBin); err != nil {
+		m.addLog(fmt.Sprintf("[tower] Failed to create symlink: %v", err))
+		// Not fatal, continue
+	}
+
+	m.addLog("[tower] Reinstallation complete!")
+
+	// Reset status
+	m.mu.Lock()
+	m.status = StatusStopped
+	m.lastError = ""
+	m.mu.Unlock()
+}
+
+// copyDir recursively copies a directory
+func (m *Monitor) copyDir(src, dst string) error {
+	// Use cp -r for simplicity
+	cmd := exec.Command("cp", "-r", src, dst)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%v: %s", err, string(output))
+	}
+	return nil
 }
 
 func (m *Monitor) GetStatus() Status {

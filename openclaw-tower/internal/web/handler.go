@@ -19,74 +19,23 @@ import (
 	"openclaw-tower/internal/terminal"
 )
 
-// Default OpenClaw config (embedded from Dockerfile.lzc)
-const defaultConfig = `{
-  "version": 1,
-  "providers": {
-    "Anthropic Claude": {
-      "type": "anthropic",
-      "models": [
-        {
-          "id": "gemini-claude-sonnet-4-5",
-          "name": "Sonnet 4.5",
-          "api": "anthropic-messages",
-          "reasoning": true,
-          "input": ["text", "image", "pdf"],
-          "contextWindow": 200000,
-          "maxTokens": 64000
-        }
-      ],
-      "apiKey": "获取Key请VIP群联系"
-    }
-  },
-  "agents": {
-    "defaults": {
-      "workspace": "/home/node/clawd",
-      "maxConcurrent": 4,
-      "subagents": {
-        "maxConcurrent": 8
-      },
-      "model": {
-        "primary": "Anthropic Claude/gemini-claude-sonnet-4-5"
-      }
-    }
-  },
-  "commands": {
-    "native": "auto",
-    "nativeSkills": "auto"
-  },
-  "messages": {
-    "ackReactionScope": "group-mentions"
-  },
-  "gateway": {
-    "mode": "local",
-    "trustedProxies": ["0.0.0.0/0", "::/0"],
-    "controlUi": {
-      "allowInsecureAuth": true,
-      "dangerouslyDisableDeviceAuth": true,
-      "injectToken": true,
-      "allowedOrigins": ["*"]
-    },
-    "auth": {
-      "mode": "token",
-      "token": "admin"
-    }
-  },
-  "browser": {
-    "enabled": true,
-    "headless": true,
-    "noSandbox": true,
-    "defaultProfile": "clawd",
-    "executablePath": "/usr/bin/chromium"
-  }
-}`
+// Default OpenClaw config (embedded from default-config.json).
+//
+//go:embed default-config.json
+var defaultConfig string
 
 // Tower health check script to inject into proxied HTML responses
 const towerHealthCheckScript = `<script>
 (function(){
   var checkInterval = setInterval(function(){
     fetch('/tower/status').then(function(r){return r.json()}).then(function(d){
-      if(d.status==='crashed'||d.status==='stopped'||!d.userConfirmed){
+      // Only reload if crashed/stopped, or if crashed before and user hasn't confirmed yet
+      if(d.status==='crashed'||d.status==='stopped'){
+        clearInterval(checkInterval);
+        location.reload();
+      }
+      // If running but crashed before and not confirmed, also reload to recovery UI
+      if(d.status==='running'&&d.crashCount>0&&!d.userConfirmed){
         clearInterval(checkInterval);
         location.reload();
       }
