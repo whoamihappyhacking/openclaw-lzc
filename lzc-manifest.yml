@@ -1,26 +1,27 @@
 package: iamxiaoe.lzcapp.openclaw
-version: 1.0.1
-name: OpenClaw
+version: 1.1.0
+name: OpenClaw(2026.2.3)
 description: 真正能做事的AI Agent
 author: https://openclaw.ai
 application:
   subdomain: openclaw
   routes:
-    - /=http://openclaw:18789
+    - /=http://openclaw:8800
   ingress:
     - protocol: tcp
       port: 18789
-      services: openclaw
+      service: openclaw
     - protocol: tcp
       port: 18792
-      services: openclaw
+      service: openclaw
     - protocol: tcp
-      port: 18800
-      services: openclaw
+      port: 8800
+      service: openclaw
 
 services:
   openclaw:
-    image: registry.lazycat.cloud/openclaw:1.0.1
+    image: registry.lazycat.cloud/openclaw:1.1.0
+    # image: dev.poker.heiyu.space/openclaw-debug:0.0.2
     dns:
       - 8.8.8.8
       - 8.8.4.4
@@ -32,20 +33,20 @@ services:
       - /lzcapp/var/openclaw-data:/home/node/.openclaw
       - /lzcapp/var/openclaw-workspace:/home/node/clawd
       - /lzcapp/var/openclaw-app:/app
-    command: "gateway --bind lan --port 18789"
     healthcheck:
-      test: ["CMD", "openclaw", "health", "--json"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8800"]
+      interval: 1s
+      timeout: 2s
+      retries: 300
       start_period: 10s
 
 locales:
   zh:
-    name: "OpenClaw"
+    name: "OpenClaw(2026.2.3)"
     description: "真正能做事的AI Agent"
     usage: |
       ## 首次使用
+      注意不要随意把龙虾暴露到公网，默认把网页鉴权去除！
 
       1. 在 Overview 界面配置 Token，默认密码是 `admin`
       2. 配置大模型 API（支持 Claude、OpenAI 等）
@@ -65,10 +66,11 @@ locales:
 
       如需帮助请联系 VIP 群。
   en:
-    name: "OpenClaw"
+    name: "OpenClaw(2026.2.3)"
     description: "AI Agent that actually gets things done"
     usage: |
       ## First-time Setup
+      Be careful not to expose Openclaw to the public internet; web authentication is disabled by default!
 
       1. Configure the Token on the Overview page (default password: `admin`)
       2. Set up your LLM API (supports Claude, OpenAI, etc.)
