@@ -14,7 +14,7 @@ import (
 var staticFS embed.FS
 
 func main() {
-	port := flag.String("port", "18800", "Port to listen on")
+	port := flag.String("port", "8800", "Port to listen on")
 	openclawPort := flag.String("openclaw-port", "18789", "OpenClaw gateway port")
 	configPath := flag.String("config", "/home/node/.openclaw/openclaw.json", "OpenClaw config file path")
 	flag.Parse()

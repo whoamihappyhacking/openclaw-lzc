@@ -268,7 +268,7 @@ case "$CMD" in
     update_agents_domain
     init_config
     # 启动 Tower 守护进程，它会内部启动 OpenClaw 并提供健康监控和恢复界面
-    exec /usr/local/bin/tower --port 18800 --openclaw-port 18789 --config "$CONFIG_FILE"
+    exec /usr/local/bin/tower --port 8800 --openclaw-port 18789 --config "$CONFIG_FILE"
     ;;
   tower)
     # 直接启动 tower（用于调试）
@@ -286,7 +286,7 @@ case "$CMD" in
 esac
 EOF
 
-EXPOSE 18800
+EXPOSE 8800
 EXPOSE 18789
 EXPOSE 18792
 
