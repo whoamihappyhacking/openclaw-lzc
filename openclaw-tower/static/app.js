@@ -232,10 +232,18 @@ function updateStatusUI(data) {
   const statusDetails = document.getElementById("statusDetails");
   const dot = indicator.querySelector(".status-dot");
   const confirmSection = document.getElementById("confirmSection");
+  const updateExplanation = document.getElementById("updateExplanation");
+  const btnConfirmReady = document.getElementById("btnConfirmReady");
+  const btnSyncLatest = document.getElementById("btnSyncLatest");
 
   // Auto-reload when running and no crashes (first time startup)
   // This will cause Tower to proxy to OpenClaw
-  if (data.status === "running" && data.crashCount === 0 && !data.awaitingReturn) {
+  if (
+    data.status === "running" &&
+    data.crashCount === 0 &&
+    !data.awaitingReturn &&
+    !data.updateRequired
+  ) {
     showToast("OpenClaw 已就绪，正在进入...", "success");
     setTimeout(function () {
       window.location.reload();
@@ -266,21 +274,45 @@ function updateStatusUI(data) {
   if (data.awaitingReturn && data.lastRestartReason) {
     details.push("重启原因: " + data.lastRestartReason);
   }
+  if (data.updateRequired) {
+    details.push("更新提示: 检测到镜像与运行代码不一致");
+    if (data.updateReason) {
+      details.push("原因: " + data.updateReason);
+    }
+  }
   if (data.uptime) {
     details.push("运行时间: " + formatUptime(data.uptime));
   }
   statusDetails.textContent = details.join(" | ");
 
-  // Show confirm button when:
-  // - AI/config requested gateway self-restart and operator should re-enter OpenClaw
-  // - Running after a crash (legacy behavior) and not yet confirmed
-  if (
+  // Show action area when:
+  // - update is required (always show sync button), or
+  // - operator confirmation is needed after restart/crash.
+  const needsManualReturn =
     data.awaitingReturn ||
-    (data.status === "running" && data.crashCount > 0 && !data.userConfirmed)
-  ) {
+    (data.status === "running" && data.crashCount > 0 && !data.userConfirmed);
+  const showUpdateAction = !!data.updateRequired;
+
+  if (needsManualReturn || showUpdateAction) {
     confirmSection.style.display = "block";
   } else {
     confirmSection.style.display = "none";
+  }
+
+  if (btnConfirmReady) {
+    btnConfirmReady.style.display = showUpdateAction ? "none" : "flex";
+  }
+
+  if (updateExplanation) {
+    updateExplanation.style.display = showUpdateAction ? "block" : "none";
+  }
+
+  if (btnSyncLatest) {
+    btnSyncLatest.style.display = showUpdateAction ? "flex" : "none";
+    if (showUpdateAction) {
+      btnSyncLatest.disabled = false;
+      btnSyncLatest.classList.remove("loading");
+    }
   }
 
   // Update button states
@@ -424,6 +456,38 @@ function confirmReady() {
     });
 }
 
+function syncToLatest() {
+  const btn = document.getElementById("btnSyncLatest");
+  if (!btn) {
+    return;
+  }
+
+  setLoading(btn, true);
+  showToast("开始同步到最新懒猫 OpenClaw 版本...", "info");
+
+  fetch("/tower/sync-latest", { method: "POST" })
+    .then(function (res) {
+      return res.json();
+    })
+    .then(function (data) {
+      if (data.ok === "true") {
+        showToast("同步完成，正在刷新状态...", "success");
+      } else {
+        showToast(data.error || "同步失败", "error");
+      }
+    })
+    .catch(function (err) {
+      showToast("请求失败: " + err.message, "error");
+    })
+    .finally(function () {
+      setLoading(btn, false);
+      setTimeout(function () {
+        pollStatus();
+        pollLogs();
+      }, 500);
+    });
+}
+
 // Toggle logs expand/collapse
 function toggleLogsExpand() {
   const section = document.getElementById("logsSection");
@@ -468,12 +532,18 @@ function toggleTerminalExpand() {
 
 // UI Helpers
 function setLoading(btn, loading) {
+  if (!btn) {
+    return;
+  }
   if (loading) {
     btn.classList.add("loading");
     btn.disabled = true;
   } else {
     btn.classList.remove("loading");
-    // Don't re-enable here, let pollStatus handle button states
+    // Keep legacy button state behavior; status polling controls start/stop buttons.
+    if (btn.id === "btnSyncLatest") {
+      btn.disabled = false;
+    }
   }
 }
 
