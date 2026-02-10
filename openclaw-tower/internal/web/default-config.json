@@ -2,15 +2,15 @@
   "models": {
     "mode": "merge",
     "providers": {
-      "Anthropic Claude": {
-        "baseUrl": "https://axy5920-cliproxyapi.hf.space/v1",
+      "Demo": {
+        "baseUrl": "https://请填写您的api提供商域名/v1",
         "api": "openai-completions",
         "auth": "token",
         "authHeader": true,
         "models": [
           {
-            "id": "gemini-claude-sonnet-4-5",
-            "name": "gemini-claude-sonnet-4-5",
+            "id": "demo-model",
+            "name": "demo-model",
             "api": "openai-completions",
             "reasoning": true,
             "input": ["text"],
@@ -18,7 +18,7 @@
             "maxTokens": 4096
           }
         ],
-        "apiKey": "获取Key请VIP群联系"
+        "apiKey": "请填写API提供商的Key"
       }
     }
   },
@@ -30,7 +30,7 @@
         "maxConcurrent": 8
       },
       "model": {
-        "primary": "Anthropic Claude/gemini-claude-sonnet-4-5"
+        "primary": "Demo/demo-model"
       }
     }
   },
@@ -60,7 +60,7 @@
     "enabled": true,
     "headless": true,
     "noSandbox": true,
-    "defaultProfile": "clawd",
+    "defaultProfile": "openclaw",
     "executablePath": "/usr/bin/chromium"
   }
 }

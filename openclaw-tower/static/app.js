@@ -161,7 +161,9 @@ function pollLogs() {
 
 // Update logs UI
 function updateLogsUI(newLogs) {
-  if (newLogs.length === 0) return;
+  if (newLogs.length === 0) {
+    return;
+  }
 
   const logsContent = document.getElementById("logsContent");
   const logsContainer = document.getElementById("logsContainer");
@@ -233,7 +235,7 @@ function updateStatusUI(data) {
 
   // Auto-reload when running and no crashes (first time startup)
   // This will cause Tower to proxy to OpenClaw
-  if (data.status === "running" && data.crashCount === 0) {
+  if (data.status === "running" && data.crashCount === 0 && !data.awaitingReturn) {
     showToast("OpenClaw 已就绪，正在进入...", "success");
     setTimeout(function () {
       window.location.reload();
@@ -261,15 +263,21 @@ function updateStatusUI(data) {
   if (data.lastError) {
     details.push("错误: " + data.lastError);
   }
+  if (data.awaitingReturn && data.lastRestartReason) {
+    details.push("重启原因: " + data.lastRestartReason);
+  }
   if (data.uptime) {
     details.push("运行时间: " + formatUptime(data.uptime));
   }
   statusDetails.textContent = details.join(" | ");
 
-  // Show confirm button only when:
-  // - Running after a crash (crashCount > 0)
-  // - Not yet confirmed
-  if (data.status === "running" && data.crashCount > 0 && !data.userConfirmed) {
+  // Show confirm button when:
+  // - AI/config requested gateway self-restart and operator should re-enter OpenClaw
+  // - Running after a crash (legacy behavior) and not yet confirmed
+  if (
+    data.awaitingReturn ||
+    (data.status === "running" && data.crashCount > 0 && !data.userConfirmed)
+  ) {
     confirmSection.style.display = "block";
   } else {
     confirmSection.style.display = "none";

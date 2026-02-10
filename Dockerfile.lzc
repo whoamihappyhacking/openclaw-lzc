@@ -159,6 +159,14 @@ echo "[openclaw] Running as root user..."
 init_openclaw() {
   # 从镜像获取版本
   local image_version=$(grep '"version"' "$IMAGE_DIR/package.json" | head -1 | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+  local image_commit=""
+  local current_commit=""
+  local image_entry_hash=""
+  local current_entry_hash=""
+
+  if [ -f "$IMAGE_DIR/dist/build-info.json" ]; then
+    image_commit=$(jq -r '.commit // empty' "$IMAGE_DIR/dist/build-info.json" 2>/dev/null || true)
+  fi
 
   if [ ! -f "$OPENCLAW_DIR/package.json" ]; then
     echo "[openclaw] First run, initializing from image (v$image_version)..."
@@ -169,7 +177,41 @@ init_openclaw() {
   else
     # 检查版本
     local current_version=$(grep '"version"' "$OPENCLAW_DIR/package.json" | head -1 | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+    if [ -f "$OPENCLAW_DIR/dist/build-info.json" ]; then
+      current_commit=$(jq -r '.commit // empty' "$OPENCLAW_DIR/dist/build-info.json" 2>/dev/null || true)
+    fi
+
     echo "[openclaw] Current version: $current_version (image: $image_version)"
+    if [ -n "$current_commit" ] || [ -n "$image_commit" ]; then
+      echo "[openclaw] Current commit: ${current_commit:-unknown} (image: ${image_commit:-unknown})"
+    fi
+
+    # 本地 rebuild 常见场景：版本号不变，但镜像代码已更新。
+    # 持久卷里已有 openclaw 时会跳过初始化，这会导致继续运行旧代码。
+    # 这里在“同版本但 commit/hash 不一致”时自动同步镜像代码。
+    local needs_sync=0
+    local sync_reason=""
+    if [ "$current_version" = "$image_version" ]; then
+      if [ -n "$current_commit" ] && [ -n "$image_commit" ] && [ "$current_commit" != "$image_commit" ]; then
+        needs_sync=1
+        sync_reason="commit changed under same version"
+      elif [ -f "$IMAGE_DIR/dist/entry.js" ] && [ -f "$OPENCLAW_DIR/dist/entry.js" ]; then
+        image_entry_hash=$(sha256sum "$IMAGE_DIR/dist/entry.js" | awk '{print $1}')
+        current_entry_hash=$(sha256sum "$OPENCLAW_DIR/dist/entry.js" | awk '{print $1}')
+        if [ -n "$image_entry_hash" ] && [ -n "$current_entry_hash" ] && [ "$image_entry_hash" != "$current_entry_hash" ]; then
+          needs_sync=1
+          sync_reason="entry hash changed under same version"
+        fi
+      fi
+    fi
+
+    if [ "$needs_sync" = "1" ]; then
+      echo "[openclaw] Syncing openclaw from image ($sync_reason)..."
+      rm -rf "$OPENCLAW_DIR"
+      mkdir -p "$NPM_GLOBAL/lib/node_modules"
+      cp -r "$IMAGE_DIR" "$OPENCLAW_DIR"
+      echo "[openclaw] Sync completed"
+    fi
 
     # 注意: dist/entry.js 完整性检查已移至 Tower 守护进程
     # Tower 会在启动时检测并修复损坏的安装，用户可在修复界面看到进度

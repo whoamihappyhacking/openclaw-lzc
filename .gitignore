@@ -125,3 +125,11 @@ dist/protocol.schema.json
 *.lpk
 /data/
 /moltbot-chorme-exntension.zip
+
+# Local scratch files
+a.html
+catchatplan.md
+lzc-icon.jpeg
+lzc-manifest.moltbot.yml.bak
+scripts/bun-linux-x64/
+scripts/ttyd

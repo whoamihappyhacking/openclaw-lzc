@@ -1,6 +1,6 @@
 package: iamxiaoe.lzcapp.openclaw
-version: 1.1.0
-name: OpenClaw(2026.2.3)
+version: 1.1.1
+name: OpenClaw(2026.2.6-3)
 description: 真正能做事的AI Agent
 author: https://openclaw.ai
 application:
@@ -20,7 +20,7 @@ application:
 
 services:
   openclaw:
-    image: registry.lazycat.cloud/openclaw:1.1.0
+    image: registry.lazycat.cloud/openclaw:1.1.1
     # image: dev.poker.heiyu.space/openclaw-debug:0.0.2
     dns:
       - 8.8.8.8
@@ -42,7 +42,7 @@ services:
 
 locales:
   zh:
-    name: "OpenClaw(2026.2.3)"
+    name: "OpenClaw(2026.2.6-3)"
     description: "真正能做事的AI Agent"
     usage: |
       ## 首次使用
@@ -66,7 +66,7 @@ locales:
 
       如需帮助请联系 VIP 群。
   en:
-    name: "OpenClaw(2026.2.3)"
+    name: "OpenClaw(2026.2.6-3)"
     description: "AI Agent that actually gets things done"
     usage: |
       ## First-time Setup

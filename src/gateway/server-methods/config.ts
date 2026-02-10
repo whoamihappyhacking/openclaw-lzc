@@ -265,8 +265,8 @@ export const configHandlers: GatewayRequestHandlers = {
       return;
     }
     const snapshot = await readConfigFileSnapshot();
-    const schema = loadSchemaWithPlugins();
-    respond(true, redactConfigSnapshot(snapshot, schema.uiHints), undefined);
+    // 懒猫微服：Control UI 直接展示真实配置值（包括 key），不做 UI 脱敏。
+    respond(true, snapshot, undefined);
   },
   "config.schema": ({ params, respond }) => {
     if (!assertValidParams(params, validateConfigSchemaParams, "config.schema", respond)) {
@@ -325,7 +325,7 @@ export const configHandlers: GatewayRequestHandlers = {
       {
         ok: true,
         path: createConfigIO().configPath,
-        config: redactConfigObject(parsed.config, parsed.schema.uiHints),
+        config: parsed.config,
       },
       undefined,
     );
@@ -442,7 +442,7 @@ export const configHandlers: GatewayRequestHandlers = {
       {
         ok: true,
         path: createConfigIO().configPath,
-        config: redactConfigObject(validated.config, schemaPatch.uiHints),
+        config: validated.config,
         restart,
         sentinel: {
           path: sentinelPath,
@@ -502,7 +502,7 @@ export const configHandlers: GatewayRequestHandlers = {
       {
         ok: true,
         path: createConfigIO().configPath,
-        config: redactConfigObject(parsed.config, parsed.schema.uiHints),
+        config: parsed.config,
         restart,
         sentinel: {
           path: sentinelPath,

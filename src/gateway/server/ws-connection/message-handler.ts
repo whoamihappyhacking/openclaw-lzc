@@ -45,7 +45,7 @@ import {
 } from "../../net.js";
 import { resolveNodeCommandAllowlist } from "../../node-command-policy.js";
 import { checkBrowserOrigin } from "../../origin-check.js";
-import { GATEWAY_CLIENT_IDS, GATEWAY_CLIENT_MODES } from "../../protocol/client-info.js";
+import { GATEWAY_CLIENT_IDS, GATEWAY_CLIENT_MODES, normalizeGatewayClientName } from "../../protocol/client-info.js";
 import {
   ConnectErrorDetailCodes,
   resolveDeviceAuthConnectErrorDetailCode,
@@ -231,6 +231,11 @@ function resolvePinnedClientMetadata(params: {
     pinnedPlatform: hasPinnedPlatform ? params.pairedPlatform : undefined,
     pinnedDeviceFamily: hasPinnedDeviceFamily ? params.pairedDeviceFamily : undefined,
   };
+}
+
+function isControlUiClient(client?: { id?: string | null }): boolean {
+  const clientId = normalizeGatewayClientName(client?.id);
+  return clientId === GATEWAY_CLIENT_IDS.CONTROL_UI || clientId === GATEWAY_CLIENT_IDS.WEBCHAT_UI;
 }
 
 export function attachGatewayWsMessageHandler(params: {
@@ -494,7 +499,7 @@ export function attachGatewayWsMessageHandler(params: {
         connectParams.role = role;
         connectParams.scopes = scopes;
 
-        const isControlUi = connectParams.client.id === GATEWAY_CLIENT_IDS.CONTROL_UI;
+        const isControlUi = isControlUiClient(connectParams.client);
         const isWebchat = isWebchatConnect(connectParams);
         if (enforceOriginCheckForAnyClient || isControlUi || isWebchat) {
           const hostHeaderOriginFallbackEnabled =
@@ -538,8 +543,9 @@ export function attachGatewayWsMessageHandler(params: {
         const hasPasswordAuth = Boolean(connectParams.auth?.password);
         const hasSharedAuth = hasTokenAuth || hasPasswordAuth;
         const controlUiConfig = configSnapshot.gateway?.controlUi;
+        const isBrowserUi = isControlUi || isWebchat;
         // 懒猫微服：默认禁用设备认证，避免用户需要手动配置
-        const effectiveControlUiConfig = isControlUi
+        const effectiveControlUiConfig = isBrowserUi
           ? {
               ...controlUiConfig,
               dangerouslyDisableDeviceAuth:
@@ -547,10 +553,12 @@ export function attachGatewayWsMessageHandler(params: {
             }
           : controlUiConfig;
         const controlUiAuthPolicy = resolveControlUiAuthPolicy({
-          isControlUi,
+          isControlUi: isBrowserUi,
           controlUiConfig: effectiveControlUiConfig,
           deviceRaw,
         });
+        // ZeroTrust front-door deployments can intentionally disable browser UI auth.
+        const allowAnonymousControlUi = controlUiAuthPolicy.allowBypass;
         const device = controlUiAuthPolicy.device;
 
         let {
@@ -616,18 +624,19 @@ export function attachGatewayWsMessageHandler(params: {
         const handleMissingDeviceIdentity = (): boolean => {
           if (!device) {
             clearUnboundScopes();
+            if (allowAnonymousControlUi) {
+              return true;
+            }
           }
-          const trustedProxyAuthOk = isTrustedProxyControlUiOperatorAuth({
-            isControlUi,
-            role,
-            authMode: resolvedAuth.mode,
-            authOk,
-            authMethod,
-          });
+          const trustedProxyAuthOk =
+            isBrowserUi &&
+            resolvedAuth.mode === "trusted-proxy" &&
+            authOk &&
+            authMethod === "trusted-proxy";
           const decision = evaluateMissingDeviceIdentity({
             hasDeviceIdentity: Boolean(device),
             role,
-            isControlUi,
+            isControlUi: isBrowserUi,
             controlUiAuthPolicy,
             trustedProxyAuthOk,
             sharedAuthOk,
@@ -750,6 +759,11 @@ export function attachGatewayWsMessageHandler(params: {
           clientIp: browserRateLimitClientIp,
           verifyDeviceToken,
         }));
+        // ZeroTrust front-door deployments can intentionally disable browser UI auth.
+        if (!authOk && allowAnonymousControlUi) {
+          authOk = true;
+          authMethod = "token";
+        }
         if (!authOk) {
           rejectUnauthorized(authResult);
           return;

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -15,11 +16,11 @@ import (
 
 const (
 	// OpenClaw installation paths
-	ImageDir       = "/opt/openclaw-image"
-	NPMGlobal      = "/app/npm-global"
-	OpenClawDir    = NPMGlobal + "/lib/node_modules/openclaw"
-	OpenClawBin    = NPMGlobal + "/bin/openclaw"
-	EntryJSPath    = OpenClawDir + "/dist/entry.js"
+	ImageDir    = "/opt/openclaw-image"
+	NPMGlobal   = "/app/npm-global"
+	OpenClawDir = NPMGlobal + "/lib/node_modules/openclaw"
+	OpenClawBin = NPMGlobal + "/bin/openclaw"
+	EntryJSPath = OpenClawDir + "/dist/entry.js"
 )
 
 type Status string
@@ -39,16 +40,18 @@ type Config struct {
 }
 
 type Monitor struct {
-	config        Config
-	status        Status
-	userConfirmed bool
-	mu            sync.RWMutex
-	cmd           *exec.Cmd
-	lastError     string
-	startTime     time.Time
-	crashCount    int
-	logs          []string
-	logsMu        sync.RWMutex
+	config            Config
+	status            Status
+	userConfirmed     bool
+	awaitingReturn    bool
+	mu                sync.RWMutex
+	cmd               *exec.Cmd
+	lastError         string
+	lastRestartReason string
+	startTime         time.Time
+	crashCount        int
+	logs              []string
+	logsMu            sync.RWMutex
 }
 
 func New(cfg Config) *Monitor {
@@ -156,10 +159,12 @@ func (m *Monitor) GetStatusInfo() map[string]interface{} {
 	defer m.mu.RUnlock()
 
 	info := map[string]interface{}{
-		"status":        string(m.status),
-		"userConfirmed": m.userConfirmed,
-		"crashCount":    m.crashCount,
-		"lastError":     m.lastError,
+		"status":            string(m.status),
+		"userConfirmed":     m.userConfirmed,
+		"awaitingReturn":    m.awaitingReturn,
+		"crashCount":        m.crashCount,
+		"lastError":         m.lastError,
+		"lastRestartReason": m.lastRestartReason,
 	}
 
 	if !m.startTime.IsZero() {
@@ -205,6 +210,11 @@ func (m *Monitor) IsProxyMode() bool {
 	// Proxy when running, unless crashed and not yet confirmed
 	// After crash, user must confirm to re-enter proxy mode
 	if m.status == StatusRunning {
+		// OpenClaw requested an in-process restart (for example after AI config operations).
+		// Keep Tower UI visible until operator confirms return.
+		if m.awaitingReturn {
+			return false
+		}
 		// If never crashed, auto-proxy
 		// If crashed before, need user confirmation
 		if m.crashCount == 0 {
@@ -219,6 +229,10 @@ func (m *Monitor) SetUserConfirmed(confirmed bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.userConfirmed = confirmed
+	if confirmed {
+		m.awaitingReturn = false
+		m.lastRestartReason = ""
+	}
 }
 
 func (m *Monitor) StartOpenClaw() error {
@@ -237,6 +251,8 @@ func (m *Monitor) StopOpenClaw() error {
 
 	if m.cmd == nil || m.cmd.Process == nil {
 		m.status = StatusStopped
+		m.awaitingReturn = false
+		m.lastRestartReason = ""
 		m.mu.Unlock()
 		return nil
 	}
@@ -267,6 +283,8 @@ func (m *Monitor) StopOpenClaw() error {
 		m.mu.Lock()
 		m.status = StatusStopped
 		m.cmd = nil
+		m.awaitingReturn = false
+		m.lastRestartReason = ""
 		m.mu.Unlock()
 		m.addLog("[tower] OpenClaw stopped gracefully")
 	case <-time.After(5 * time.Second):
@@ -275,6 +293,8 @@ func (m *Monitor) StopOpenClaw() error {
 		m.mu.Lock()
 		m.status = StatusStopped
 		m.cmd = nil
+		m.awaitingReturn = false
+		m.lastRestartReason = ""
 		m.mu.Unlock()
 		m.addLog("[tower] OpenClaw force killed (timeout)")
 	}
@@ -286,6 +306,8 @@ func (m *Monitor) startOpenClaw() error {
 	m.mu.Lock()
 	m.status = StatusStarting
 	m.lastError = ""
+	m.awaitingReturn = false
+	m.lastRestartReason = ""
 	m.mu.Unlock()
 
 	m.addLog("[tower] Starting OpenClaw...")
@@ -338,8 +360,11 @@ func (m *Monitor) startOpenClaw() error {
 			m.lastError = err.Error()
 			m.crashCount++
 			m.userConfirmed = false // Reset confirmation on crash
+			m.awaitingReturn = false
+			m.lastRestartReason = ""
 		} else {
 			m.status = StatusStopped
+			m.awaitingReturn = false
 		}
 		m.cmd = nil
 		m.mu.Unlock()
@@ -363,9 +388,36 @@ func (m *Monitor) readOutput(r io.Reader, name string) {
 
 	for scanner.Scan() {
 		line := scanner.Text()
+		m.trackRestartIntent(line)
 		m.addLog(line)
 		// Also print to console for debugging
 		fmt.Printf("[openclaw:%s] %s\n", name, line)
+	}
+}
+
+func (m *Monitor) trackRestartIntent(line string) {
+	lower := strings.ToLower(line)
+	restartByConfig := strings.Contains(lower, "config change requires gateway restart")
+	restartBySignal := strings.Contains(lower, "received sigusr1; restarting")
+	if !restartByConfig && !restartBySignal {
+		return
+	}
+
+	reason := "Gateway self-restart requested"
+	if restartByConfig {
+		reason = "Config change requested gateway restart"
+	}
+
+	m.mu.Lock()
+	alreadyAwaiting := m.awaitingReturn
+	m.awaitingReturn = true
+	m.userConfirmed = false
+	m.status = StatusStarting
+	m.lastRestartReason = reason
+	m.mu.Unlock()
+
+	if !alreadyAwaiting {
+		m.addLog("[tower] Detected gateway self-restart, waiting for operator confirmation to return")
 	}
 }
 
@@ -396,6 +448,8 @@ func (m *Monitor) checkHealth() {
 		m.lastError = err.Error()
 		m.crashCount++
 		m.userConfirmed = false
+		m.awaitingReturn = false
+		m.lastRestartReason = ""
 		m.mu.Unlock()
 		m.addLog(fmt.Sprintf("[tower] Health check failed: %v", err))
 		return
