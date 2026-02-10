@@ -29,8 +29,8 @@ const towerHealthCheckScript = `<script>
 (function(){
   var checkInterval = setInterval(function(){
     fetch('/tower/status').then(function(r){return r.json()}).then(function(d){
-      // Return to Tower UI when gateway is down, crashed, or requested an operator-confirmed return
-      if(d.awaitingReturn||d.status==='crashed'||d.status==='stopped'){
+      // Return to Tower UI when gateway is down, crashed, awaiting manual return, or update is required
+      if((d.updateRequired&&!d.userConfirmed)||d.awaitingReturn||d.status==='crashed'||d.status==='stopped'){
         clearInterval(checkInterval);
         location.reload();
       }
@@ -175,6 +175,9 @@ func (h *Handler) handleTowerAPI(w http.ResponseWriter, r *http.Request) {
 	case path == "/stop" && r.Method == "POST":
 		h.handleStop(w, r)
 
+	case path == "/sync-latest" && r.Method == "POST":
+		h.handleSyncLatest(w, r)
+
 	case path == "/restore-backup" && r.Method == "POST":
 		h.handleRestoreBackup(w, r)
 
@@ -225,6 +228,14 @@ func (h *Handler) handleStop(w http.ResponseWriter, r *http.Request) {
 	h.jsonOK(w, "OpenClaw stopped")
 }
 
+func (h *Handler) handleSyncLatest(w http.ResponseWriter, r *http.Request) {
+	if err := h.config.Monitor.SyncInstallToLatest(); err != nil {
+		h.jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	h.jsonOK(w, "OpenClaw synced to latest image")
+}
+
 func (h *Handler) handleRestoreBackup(w http.ResponseWriter, r *http.Request) {
 	if err := h.recovery.RestoreBackup(); err != nil {
 		h.jsonError(w, err.Error(), http.StatusInternalServerError)
@@ -242,6 +253,11 @@ func (h *Handler) handleRestoreDefault(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleConfirmReady(w http.ResponseWriter, r *http.Request) {
+	if h.config.Monitor.IsUpdateRequired() {
+		h.jsonError(w, "Update required; please sync to latest OpenClaw first", http.StatusBadRequest)
+		return
+	}
+
 	h.config.Monitor.SetUserConfirmed(true)
 	h.jsonOK(w, "Confirmed, switching to OpenClaw")
 }
