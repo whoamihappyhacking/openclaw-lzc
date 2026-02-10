@@ -29,8 +29,8 @@ const towerHealthCheckScript = `<script>
 (function(){
   var checkInterval = setInterval(function(){
     fetch('/tower/status').then(function(r){return r.json()}).then(function(d){
-      // Only reload if crashed/stopped, or if crashed before and user hasn't confirmed yet
-      if(d.status==='crashed'||d.status==='stopped'){
+      // Return to Tower UI when gateway is down, crashed, or requested an operator-confirmed return
+      if(d.awaitingReturn||d.status==='crashed'||d.status==='stopped'){
         clearInterval(checkInterval);
         location.reload();
       }

@@ -3,6 +3,9 @@ import type { Duplex } from "node:stream";
 import { timingSafeEqual } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { ResolvedGatewayAuth } from "../auth.js";
+import type { GatewayWsClient } from "../server/ws-types.js";
+import { isLocalDirectRequest } from "../auth.js";
+import { resolveGatewayClientIp } from "../net.js";
 import {
   createTerminal,
   writeToTerminal,
@@ -20,7 +23,9 @@ type TerminalWsMessage =
   | { type: "close" };
 
 function safeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
+  if (a.length !== b.length) {
+    return false;
+  }
   try {
     return timingSafeEqual(Buffer.from(a), Buffer.from(b));
   } catch {
@@ -38,6 +43,45 @@ function verifyAuth(auth: ResolvedGatewayAuth, token: string): boolean {
   return false;
 }
 
+function getHeader(req: IncomingMessage, name: string): string | undefined {
+  const value = req.headers[name.toLowerCase()];
+  if (Array.isArray(value)) {
+    return value.join(",");
+  }
+  return typeof value === "string" ? value : undefined;
+}
+
+function hasAuthorizedWsClientForIp(clients: Set<GatewayWsClient>, clientIp: string): boolean {
+  for (const client of clients) {
+    if (client.clientIp && client.clientIp === clientIp) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isAuthorizedByExistingGatewayClient(params: {
+  req: IncomingMessage;
+  trustedProxies: string[];
+  clients: Set<GatewayWsClient>;
+}): boolean {
+  const { req, trustedProxies, clients } = params;
+  if (isLocalDirectRequest(req, trustedProxies)) {
+    return true;
+  }
+
+  const clientIp = resolveGatewayClientIp({
+    remoteAddr: req.socket?.remoteAddress ?? "",
+    forwardedFor: getHeader(req, "x-forwarded-for"),
+    realIp: getHeader(req, "x-real-ip"),
+    trustedProxies,
+  });
+  if (!clientIp) {
+    return false;
+  }
+  return hasAuthorizedWsClientForIp(clients, clientIp);
+}
+
 export function createTerminalWebSocketServer(): WebSocketServer {
   return new WebSocketServer({ noServer: true });
 }
@@ -50,6 +94,8 @@ export function handleTerminalUpgrade(
   opts: {
     resolvedAuth: ResolvedGatewayAuth;
     defaultCwd?: string;
+    trustedProxies?: string[];
+    clients?: Set<GatewayWsClient>;
   },
 ): boolean {
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
@@ -61,17 +107,30 @@ export function handleTerminalUpgrade(
   const token = url.searchParams.get("token");
   const terminalId = url.searchParams.get("id");
 
-  if (!token || !terminalId) {
+  if (!terminalId) {
     socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
     socket.destroy();
     return true;
   }
 
-  // Verify token
-  if (!verifyAuth(opts.resolvedAuth, token)) {
-    socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
-    socket.destroy();
-    return true;
+  const tokenOk =
+    typeof token === "string" && token.length > 0 && verifyAuth(opts.resolvedAuth, token);
+  if (!tokenOk) {
+    const trustedProxies = opts.trustedProxies ?? [];
+    const clients = opts.clients;
+    const allowWithoutToken =
+      clients &&
+      isAuthorizedByExistingGatewayClient({
+        req,
+        trustedProxies,
+        clients,
+      });
+
+    if (!allowWithoutToken) {
+      socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+      socket.destroy();
+      return true;
+    }
   }
 
   wss.handleUpgrade(req, socket, head, (ws) => {

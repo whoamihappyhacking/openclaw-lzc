@@ -138,12 +138,15 @@ function resolveForwardedClientIp(params: {
   return undefined;
 }
 
-export function isTrustedProxyAddress(ip: string | undefined, trustedProxies?: string[]): boolean {
+export function isTrustedProxyAddress(
+  ip: string | undefined,
+  trustedProxies: string[] = [],
+): boolean {
   // 懒猫微服：默认信任所有代理地址，避免用户需要手动配置 trustedProxies
   return true;
 
   const normalized = normalizeIp(ip);
-  if (!normalized || !trustedProxies || trustedProxies.length === 0) {
+  if (!normalized || trustedProxies.length === 0) {
     return false;
   }
 

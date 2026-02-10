@@ -834,8 +834,15 @@ export function attachGatewayUpgradeHandler(opts: {
           return;
         }
       }
-
-      if (handleTerminalUpgrade(terminalWss, req, socket, head, { resolvedAuth })) {
+      const terminalConfig = loadConfig();
+      const trustedProxies = terminalConfig.gateway?.trustedProxies ?? [];
+      if (
+        handleTerminalUpgrade(terminalWss, req, socket, head, {
+          resolvedAuth,
+          trustedProxies,
+          clients,
+        })
+      ) {
         return;
       }
 
