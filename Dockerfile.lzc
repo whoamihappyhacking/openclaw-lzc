@@ -144,6 +144,7 @@ IMAGE_DIR="/opt/openclaw-image"
 NPM_GLOBAL="/app/npm-global"
 OPENCLAW_DIR="$NPM_GLOBAL/lib/node_modules/openclaw"
 OPENCLAW_BIN="$NPM_GLOBAL/bin/openclaw"
+COPY_PROGRESS_FILE="/tmp/openclaw-entrypoint-copy-progress.json"
 
 CONFIG_DIR="${OPENCLAW_STATE_DIR:-/home/node/.openclaw}"
 CONFIG_FILE="${CONFIG_DIR}/openclaw.json"
@@ -154,6 +155,136 @@ export NPM_CONFIG_PREFIX="$NPM_GLOBAL"
 export PATH="$NPM_GLOBAL/bin:$PATH"
 
 echo "[openclaw] Running as root user..."
+
+write_copy_progress() {
+  local stage="$1"
+  local copied_entries="$2"
+  local total_entries="$3"
+  local copied_bytes="$4"
+  local total_bytes="$5"
+  local percent="$6"
+  local done="$7"
+  local ts
+  ts=$(date -u +"%Y-%m-%dT%H:%M:%S.%NZ")
+
+  printf '{"source":"entrypoint","stage":"%s","copiedEntries":%s,"totalEntries":%s,"copiedBytes":%s,"totalBytes":%s,"percent":%s,"done":%s,"updatedAt":"%s"}\n' \
+    "$stage" "$copied_entries" "$total_entries" "$copied_bytes" "$total_bytes" "$percent" "$done" "$ts" > "$COPY_PROGRESS_FILE"
+
+  echo "[openclaw] copy progress: ${stage} ${percent}% (${copied_entries}/${total_entries}, ${copied_bytes}/${total_bytes} bytes)"
+}
+
+copy_with_progress() {
+  local src="$1"
+  local dst="$2"
+  local stage="${3:-初始化复制 OpenClaw 安装}"
+  local total_entries=0
+  local total_bytes=0
+  local copied_entries=0
+  local copied_bytes=0
+  local percent=0
+  local last_percent=-1
+
+  total_entries=$(find "$src" -mindepth 1 | wc -l | tr -d ' ')
+  if [ -z "$total_entries" ] || [ "$total_entries" -le 0 ]; then
+    total_entries=1
+  fi
+
+  total_bytes=$(du -sb "$src" 2>/dev/null | awk '{print $1}')
+  if [ -z "$total_bytes" ] || [ "$total_bytes" -le 0 ]; then
+    total_bytes=1
+  fi
+
+  write_copy_progress "$stage" 0 "$total_entries" 0 "$total_bytes" 0 false
+
+  mkdir -p "$dst"
+
+  cp -a "$src"/. "$dst"/ &
+  local cp_pid=$!
+
+  while kill -0 "$cp_pid" 2>/dev/null; do
+    copied_bytes=$(du -sb "$dst" 2>/dev/null | awk '{print $1}')
+    if [ -z "$copied_bytes" ] || [ "$copied_bytes" -lt 0 ]; then
+      copied_bytes=0
+    fi
+    if [ "$copied_bytes" -gt "$total_bytes" ]; then
+      copied_bytes=$total_bytes
+    fi
+
+    percent=$((copied_bytes * 100 / total_bytes))
+    if [ "$percent" -gt 99 ]; then
+      percent=99
+    fi
+
+    copied_entries=$((copied_bytes * total_entries / total_bytes))
+    if [ "$copied_entries" -gt "$total_entries" ]; then
+      copied_entries=$total_entries
+    fi
+
+    if [ "$percent" -ne "$last_percent" ]; then
+      write_copy_progress "$stage" "$copied_entries" "$total_entries" "$copied_bytes" "$total_bytes" "$percent" false
+      last_percent=$percent
+    fi
+
+    sleep 0.5
+  done
+
+  wait "$cp_pid"
+
+  write_copy_progress "复制完成" "$total_entries" "$total_entries" "$total_bytes" "$total_bytes" 100 true
+}
+
+resolve_openclaw_entry() {
+  local pkg_json="$OPENCLAW_DIR/package.json"
+  local rel=""
+
+  if [ -f "$OPENCLAW_DIR/dist/entry.js" ]; then
+    echo "$OPENCLAW_DIR/dist/entry.js"
+    return 0
+  fi
+
+  if [ -f "$pkg_json" ]; then
+    rel=$(node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));const b=p.bin;let v="";if(typeof b==="string")v=b;else if(b&&typeof b==="object"&&typeof b.openclaw==="string")v=b.openclaw;process.stdout.write(v||"");' "$pkg_json" 2>/dev/null || true)
+  fi
+
+  if [ -n "$rel" ] && [[ "$rel" != /* ]] && [[ "$rel" != ..* ]]; then
+    local candidate="$OPENCLAW_DIR/$rel"
+    if [ -f "$candidate" ]; then
+      if head -n 1 "$candidate" 2>/dev/null | grep -q '^#!/bin/sh'; then
+        :
+      else
+      echo "$candidate"
+      return 0
+      fi
+    fi
+  fi
+
+  if [ -f "$OPENCLAW_DIR/openclaw.mjs" ]; then
+    if head -n 1 "$OPENCLAW_DIR/openclaw.mjs" 2>/dev/null | grep -q '^#!/bin/sh'; then
+      :
+    else
+    echo "$OPENCLAW_DIR/openclaw.mjs"
+    return 0
+    fi
+  fi
+
+  return 1
+}
+
+ensure_openclaw_bin() {
+  local entry
+  if ! entry=$(resolve_openclaw_entry); then
+    echo "[openclaw] ERROR: openclaw entrypoint not found under $OPENCLAW_DIR" >&2
+    return 1
+  fi
+
+  mkdir -p "$NPM_GLOBAL/bin"
+  rm -f "$OPENCLAW_BIN"
+  cat > "$OPENCLAW_BIN" <<OPENCLAW_WRAP
+#!/bin/sh
+exec node "$entry" "\$@"
+OPENCLAW_WRAP
+  chmod +x "$OPENCLAW_BIN"
+}
 
 # ========== 初始化 openclaw 到持久化卷 ==========
 init_openclaw() {
@@ -168,8 +299,8 @@ init_openclaw() {
   if [ ! -f "$OPENCLAW_DIR/package.json" ]; then
     echo "[openclaw] First run, initializing from image (v$image_version)..."
     mkdir -p "$NPM_GLOBAL/lib/node_modules" "$NPM_GLOBAL/bin"
-    cp -r "$IMAGE_DIR" "$OPENCLAW_DIR"
-    ln -sf "$OPENCLAW_DIR/openclaw.mjs" "$OPENCLAW_BIN"
+    copy_with_progress "$IMAGE_DIR" "$OPENCLAW_DIR" "初始化复制 OpenClaw 安装"
+    ensure_openclaw_bin
     echo "[openclaw] Initialized successfully"
   else
     # 检查版本
@@ -201,8 +332,7 @@ init_openclaw() {
 
     # 确保 bin 链接存在
     if [ ! -f "$OPENCLAW_BIN" ]; then
-      mkdir -p "$NPM_GLOBAL/bin"
-      ln -sf "$OPENCLAW_DIR/openclaw.mjs" "$OPENCLAW_BIN"
+      ensure_openclaw_bin
     fi
   fi
 }
