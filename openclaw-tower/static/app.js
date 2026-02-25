@@ -5,16 +5,21 @@ let fitAddon = null;
 let ws = null;
 let statusPollInterval = null;
 let logsPollInterval = null;
+let syncInFlight = false;
+let serviceActionInFlight = false;
+let dangerConfirmResolve = null;
 let logs = [];
 const MAX_LOGS = 500;
+const DANGER_CONFIRM_TEXT = "yes";
 
 // Initialize on page load
 document.addEventListener("DOMContentLoaded", function () {
   initTerminal();
+  initDangerConfirmModal();
   pollStatus();
   pollLogs();
-  // Poll status every 1 second for faster crash detection
-  statusPollInterval = setInterval(pollStatus, 1000);
+  // Poll status every 0.5 second for more responsive progress/state update
+  statusPollInterval = setInterval(pollStatus, 500);
   logsPollInterval = setInterval(pollLogs, 2000);
 });
 
@@ -225,6 +230,61 @@ function refreshLogs() {
   showToast("日志已刷新", "info");
 }
 
+// Copy logs
+function copyLogs() {
+  const logsContent = document.getElementById("logsContent");
+  if (!logsContent) {
+    showToast("日志区域不可用", "error");
+    return;
+  }
+
+  const text = logsContent.textContent || "";
+  if (!text.trim()) {
+    showToast("暂无可复制日志", "info");
+    return;
+  }
+
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard
+      .writeText(text)
+      .then(function () {
+        showToast("日志已复制", "success");
+      })
+      .catch(function () {
+        fallbackCopyText(text);
+      });
+    return;
+  }
+
+  fallbackCopyText(text);
+}
+
+function fallbackCopyText(text) {
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  textarea.style.pointerEvents = "none";
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+
+  let copied = false;
+  try {
+    copied = document.execCommand("copy");
+  } catch (_err) {
+    copied = false;
+  }
+
+  document.body.removeChild(textarea);
+
+  if (copied) {
+    showToast("日志已复制", "success");
+  } else {
+    showToast("复制失败，请手动复制", "error");
+  }
+}
+
 // Update status UI
 function updateStatusUI(data) {
   const indicator = document.getElementById("statusIndicator");
@@ -235,6 +295,12 @@ function updateStatusUI(data) {
   const updateExplanation = document.getElementById("updateExplanation");
   const btnConfirmReady = document.getElementById("btnConfirmReady");
   const btnSyncLatest = document.getElementById("btnSyncLatest");
+  const confirmActionsRow = document.getElementById("confirmActionsRow");
+  const copyProgress = document.getElementById("copyProgress");
+  const copyProgressLabel = document.getElementById("copyProgressLabel");
+  const copyProgressPercent = document.getElementById("copyProgressPercent");
+  const copyProgressFill = document.getElementById("copyProgressFill");
+  const copyProgressMeta = document.getElementById("copyProgressMeta");
 
   // Auto-reload when running and no crashes (first time startup)
   // This will cause Tower to proxy to OpenClaw
@@ -285,6 +351,15 @@ function updateStatusUI(data) {
   }
   statusDetails.textContent = details.join(" | ");
 
+  updateCopyProgressUI({
+    copyProgress,
+    copyProgressLabel,
+    copyProgressPercent,
+    copyProgressFill,
+    copyProgressMeta,
+    data,
+  });
+
   // Show action area when:
   // - update is required (always show sync button), or
   // - operator confirmation is needed after restart/crash.
@@ -292,6 +367,8 @@ function updateStatusUI(data) {
     data.awaitingReturn ||
     (data.status === "running" && data.crashCount > 0 && !data.userConfirmed);
   const showUpdateAction = !!data.updateRequired;
+  const allowReturnWhileUpdate = showUpdateAction && data.status === "running";
+  const showConfirmReadyAction = needsManualReturn || allowReturnWhileUpdate;
 
   if (needsManualReturn || showUpdateAction) {
     confirmSection.style.display = "block";
@@ -300,7 +377,7 @@ function updateStatusUI(data) {
   }
 
   if (btnConfirmReady) {
-    btnConfirmReady.style.display = showUpdateAction ? "none" : "flex";
+    btnConfirmReady.style.display = showConfirmReadyAction ? "flex" : "none";
   }
 
   if (updateExplanation) {
@@ -309,19 +386,118 @@ function updateStatusUI(data) {
 
   if (btnSyncLatest) {
     btnSyncLatest.style.display = showUpdateAction ? "flex" : "none";
-    if (showUpdateAction) {
+    if (showUpdateAction && !syncInFlight) {
       btnSyncLatest.disabled = false;
       btnSyncLatest.classList.remove("loading");
+    } else if (showUpdateAction && syncInFlight) {
+      btnSyncLatest.disabled = true;
+      btnSyncLatest.classList.add("loading");
     }
+  }
+
+  if (confirmActionsRow) {
+    const showBothActions = showConfirmReadyAction && showUpdateAction;
+    const showSyncOnlyAction = showUpdateAction && !showConfirmReadyAction;
+    confirmActionsRow.classList.toggle("dual-actions", showBothActions);
+    confirmActionsRow.classList.toggle("sync-only", showSyncOnlyAction);
   }
 
   // Update button states
   const btnStart = document.getElementById("btnStart");
   const btnStop = document.getElementById("btnStop");
 
-  btnStart.disabled = data.status === "running" || data.status === "starting";
-  btnStop.disabled = data.status === "stopped";
+  if (syncInFlight || serviceActionInFlight) {
+    btnStart.disabled = true;
+    btnStop.disabled = true;
+  } else {
+    btnStart.disabled = data.status === "running" || data.status === "starting";
+    btnStop.disabled = data.status === "stopped";
+  }
 }
+
+function updateCopyProgressUI(ctx) {
+  const copyInProgress = !!ctx.data.copyInProgress;
+  const percent = Number(ctx.data.copyPercent || 0);
+  const source = String(ctx.data.copySource || "").trim();
+  const stage = String(ctx.data.copyStage || "").trim();
+  const copiedEntries = Number(ctx.data.copyCopiedEntries || 0);
+  const totalEntries = Number(ctx.data.copyTotalEntries || 0);
+  const copiedBytes = Number(ctx.data.copyCopiedBytes || 0);
+  const totalBytes = Number(ctx.data.copyTotalBytes || 0);
+
+  if (!ctx.copyProgress) {
+    return;
+  }
+
+  if (!copyInProgress && !syncInFlight) {
+    ctx.copyProgress.style.display = "none";
+    return;
+  }
+
+  ctx.copyProgress.style.display = "block";
+
+  let sourceLabel = "Tower 同步";
+  if (source === "entrypoint") {
+    sourceLabel = "容器初始化";
+  }
+
+  const stageLabel = stage || "正在复制 OpenClaw 安装";
+  if (ctx.copyProgressLabel) {
+    ctx.copyProgressLabel.textContent = sourceLabel + " · " + stageLabel;
+  }
+
+  const safePercent = Math.max(0, Math.min(100, percent));
+  if (ctx.copyProgressPercent) {
+    ctx.copyProgressPercent.textContent = safePercent + "%";
+  }
+  if (ctx.copyProgressFill) {
+    ctx.copyProgressFill.style.width = safePercent + "%";
+  }
+
+  if (ctx.copyProgressMeta) {
+    if (totalBytes > 0) {
+      ctx.copyProgressMeta.textContent =
+        "数据进度: " + formatBytes(copiedBytes) + " / " + formatBytes(totalBytes);
+    } else if (totalEntries > 0) {
+      ctx.copyProgressMeta.textContent = "文件进度: " + copiedEntries + " / " + totalEntries;
+    } else {
+      ctx.copyProgressMeta.textContent = "正在准备复制进度...";
+    }
+  }
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 B";
+  }
+
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024;
+    index += 1;
+  }
+
+  if (index === 0) {
+    return Math.round(value) + " " + units[index];
+  }
+
+  return value.toFixed(1) + " " + units[index];
+}
+
+window.startService = startService;
+window.stopService = stopService;
+window.restoreBackup = restoreBackup;
+window.restoreDefault = restoreDefault;
+window.confirmReady = confirmReady;
+window.syncToLatest = syncToLatest;
+window.toggleLogsExpand = toggleLogsExpand;
+window.toggleTerminalExpand = toggleTerminalExpand;
+window.clearLogs = clearLogs;
+window.refreshLogs = refreshLogs;
+window.copyLogs = copyLogs;
+window.closeDangerConfirmModal = closeDangerConfirmModal;
 
 function formatUptime(seconds) {
   if (seconds < 60) {
@@ -335,8 +511,17 @@ function formatUptime(seconds) {
 
 // API Actions
 function startService() {
+  if (serviceActionInFlight || syncInFlight) {
+    return;
+  }
+
+  serviceActionInFlight = true;
   const btn = document.getElementById("btnStart");
+  const btnStop = document.getElementById("btnStop");
   setLoading(btn, true);
+  if (btnStop) {
+    btnStop.disabled = true;
+  }
 
   fetch("/tower/start", { method: "POST" })
     .then(function (res) {
@@ -353,14 +538,24 @@ function startService() {
       showToast("请求失败: " + err.message, "error");
     })
     .finally(function () {
+      serviceActionInFlight = false;
       setLoading(btn, false);
       pollStatus();
     });
 }
 
 function stopService() {
+  if (serviceActionInFlight || syncInFlight) {
+    return;
+  }
+
+  serviceActionInFlight = true;
   const btn = document.getElementById("btnStop");
+  const btnStart = document.getElementById("btnStart");
   setLoading(btn, true);
+  if (btnStart) {
+    btnStart.disabled = true;
+  }
 
   fetch("/tower/stop", { method: "POST" })
     .then(function (res) {
@@ -377,62 +572,75 @@ function stopService() {
       showToast("请求失败: " + err.message, "error");
     })
     .finally(function () {
+      serviceActionInFlight = false;
       setLoading(btn, false);
       pollStatus();
     });
 }
 
 function restoreBackup() {
-  if (!confirm("确定要恢复备份配置吗？当前配置将被覆盖。")) {
-    return;
-  }
-
-  const btn = document.getElementById("btnRestoreBackup");
-  setLoading(btn, true);
-
-  fetch("/tower/restore-backup", { method: "POST" })
-    .then(function (res) {
-      return res.json();
-    })
-    .then(function (data) {
-      if (data.ok === "true") {
-        showToast("备份配置已恢复", "success");
-      } else {
-        showToast(data.error || "恢复失败", "error");
+  requestDangerConfirmation("确定要恢复备份配置吗？当前配置将被覆盖。")
+    .then(function (confirmed) {
+      if (!confirmed) {
+        return;
       }
+
+      const btn = document.getElementById("btnRestoreBackup");
+      setLoading(btn, true);
+
+      fetch("/tower/restore-backup", { method: "POST" })
+        .then(function (res) {
+          return res.json();
+        })
+        .then(function (data) {
+          if (data.ok === "true") {
+            showToast("备份配置已恢复", "success");
+          } else {
+            showToast(data.error || "恢复失败", "error");
+          }
+        })
+        .catch(function (err) {
+          showToast("请求失败: " + err.message, "error");
+        })
+        .finally(function () {
+          setLoading(btn, false);
+        });
     })
-    .catch(function (err) {
-      showToast("请求失败: " + err.message, "error");
-    })
-    .finally(function () {
-      setLoading(btn, false);
+    .catch(function () {
+      showToast("确认流程失败", "error");
     });
 }
 
 function restoreDefault() {
-  if (!confirm("确定要恢复默认配置吗？\n\n警告：当前配置将被完全覆盖为初始配置！")) {
-    return;
-  }
-
-  const btn = document.getElementById("btnRestoreDefault");
-  setLoading(btn, true);
-
-  fetch("/tower/restore-default", { method: "POST" })
-    .then(function (res) {
-      return res.json();
-    })
-    .then(function (data) {
-      if (data.ok === "true") {
-        showToast("默认配置已恢复", "success");
-      } else {
-        showToast(data.error || "恢复失败", "error");
+  requestDangerConfirmation("确定要恢复默认配置吗？当前配置将被完全覆盖为初始配置。")
+    .then(function (confirmed) {
+      if (!confirmed) {
+        return;
       }
+
+      const btn = document.getElementById("btnRestoreDefault");
+      setLoading(btn, true);
+
+      fetch("/tower/restore-default", { method: "POST" })
+        .then(function (res) {
+          return res.json();
+        })
+        .then(function (data) {
+          if (data.ok === "true") {
+            showToast("默认配置已恢复", "success");
+          } else {
+            showToast(data.error || "恢复失败", "error");
+          }
+        })
+        .catch(function (err) {
+          showToast("请求失败: " + err.message, "error");
+        })
+        .finally(function () {
+          setLoading(btn, false);
+        });
     })
-    .catch(function (err) {
-      showToast("请求失败: " + err.message, "error");
-    })
-    .finally(function () {
-      setLoading(btn, false);
+    .catch(function () {
+      showToast("确认流程失败", "error");
     });
 }
 
@@ -462,6 +670,7 @@ function syncToLatest() {
     return;
   }
 
+  syncInFlight = true;
   setLoading(btn, true);
   showToast("开始同步到最新懒猫 OpenClaw 版本...", "info");
 
@@ -480,12 +689,107 @@ function syncToLatest() {
       showToast("请求失败: " + err.message, "error");
     })
     .finally(function () {
+      syncInFlight = false;
       setLoading(btn, false);
       setTimeout(function () {
         pollStatus();
         pollLogs();
-      }, 500);
+      }, 100);
     });
+}
+
+function initDangerConfirmModal() {
+  document.addEventListener("keydown", function (event) {
+    const modal = document.getElementById("confirmModal");
+    if (!modal || modal.style.display === "none") {
+      return;
+    }
+
+    if (event.key === "Escape") {
+      closeDangerConfirmModal(false);
+      return;
+    }
+
+    if (event.key === "Enter") {
+      const submitBtn = document.getElementById("confirmModalSubmit");
+      if (submitBtn && !submitBtn.disabled) {
+        closeDangerConfirmModal(true);
+      }
+    }
+  });
+
+  const modal = document.getElementById("confirmModal");
+  if (modal) {
+    modal.addEventListener("click", function (event) {
+      if (event.target === modal) {
+        closeDangerConfirmModal(false);
+      }
+    });
+  }
+
+  const modalInput = document.getElementById("confirmModalInput");
+  if (modalInput) {
+    modalInput.addEventListener("input", function () {
+      const submitBtn = document.getElementById("confirmModalSubmit");
+      if (!submitBtn) {
+        return;
+      }
+      submitBtn.disabled = modalInput.value.trim().toLowerCase() !== DANGER_CONFIRM_TEXT;
+    });
+  }
+}
+
+function requestDangerConfirmation(message) {
+  return new Promise(function (resolve) {
+    const modal = document.getElementById("confirmModal");
+    const modalMessage = document.getElementById("confirmModalMessage");
+    const modalInput = document.getElementById("confirmModalInput");
+    const submitBtn = document.getElementById("confirmModalSubmit");
+
+    if (!modal || !modalMessage || !modalInput || !submitBtn) {
+      resolve(false);
+      return;
+    }
+
+    dangerConfirmResolve = resolve;
+    modalMessage.textContent = message;
+    modalInput.value = "";
+    submitBtn.disabled = true;
+    modal.style.display = "flex";
+
+    setTimeout(function () {
+      modalInput.focus();
+    }, 0);
+  });
+}
+
+function closeDangerConfirmModal(confirmed) {
+  const modal = document.getElementById("confirmModal");
+  const modalInput = document.getElementById("confirmModalInput");
+  if (!modal || !modalInput) {
+    if (dangerConfirmResolve) {
+      const resolve = dangerConfirmResolve;
+      dangerConfirmResolve = null;
+      resolve(false);
+    }
+    return;
+  }
+
+  const isValid = modalInput.value.trim().toLowerCase() === DANGER_CONFIRM_TEXT;
+  const result = confirmed && isValid;
+
+  modal.style.display = "none";
+  modalInput.value = "";
+
+  if (confirmed && !isValid) {
+    showToast("请输入完整确认文本", "error");
+  }
+
+  if (dangerConfirmResolve) {
+    const resolve = dangerConfirmResolve;
+    dangerConfirmResolve = null;
+    resolve(result);
+  }
 }
 
 // Toggle logs expand/collapse

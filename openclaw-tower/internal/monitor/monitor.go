@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -29,6 +31,7 @@ const (
 	OpenClawBuildInfo   = OpenClawDir + "/dist/build-info.json"
 	OpenClawBin         = NPMGlobal + "/bin/openclaw"
 	EntryJSPath         = OpenClawDir + "/dist/entry.js"
+	EntrypointCopyState = "/tmp/openclaw-entrypoint-copy-progress.json"
 )
 
 type Status string
@@ -40,7 +43,10 @@ const (
 	StatusCrashed  Status = "crashed"
 )
 
-const MaxLogLines = 500
+const (
+	MaxLogLines          = 500
+	startupHealthTimeout = 30 * time.Second
+)
 
 type Config struct {
 	OpenClawPort string
@@ -54,11 +60,23 @@ type Monitor struct {
 	awaitingReturn    bool
 	updateRequired    bool
 	updateReason      string
+	stopRequested     bool
+	copyInProgress    bool
+	copySource        string
+	copyStage         string
+	copyTotalEntries  int
+	copyCopiedEntries int
+	copyTotalBytes    int64
+	copyCopiedBytes   int64
+	copyPercent       int
+	copyUpdatedAt     time.Time
 	mu                sync.RWMutex
 	cmd               *exec.Cmd
+	cmdDone           chan error
 	lastError         string
 	lastRestartReason string
 	startTime         time.Time
+	startingDeadline  time.Time
 	crashCount        int
 	logs              []string
 	logsMu            sync.RWMutex
@@ -79,8 +97,17 @@ func (m *Monitor) Start() {
 	// Check for same-version image/runtime drift before startup
 	m.evaluateInstallSyncRequirement()
 
-	// Initial startup
-	m.startOpenClaw()
+	if m.IsUpdateRequired() {
+		m.mu.Lock()
+		m.status = StatusStopped
+		m.lastError = ""
+		m.startingDeadline = time.Time{}
+		m.mu.Unlock()
+		m.addLog("[tower] Auto-start blocked: sync is required before entering OpenClaw")
+	} else {
+		// Initial startup
+		m.startOpenClaw()
+	}
 
 	// Health check loop - check every 1 second for faster detection
 	ticker := time.NewTicker(1 * time.Second)
@@ -109,6 +136,7 @@ func (m *Monitor) checkAndRepairInstallation() {
 	m.mu.Lock()
 	m.status = StatusStarting
 	m.lastError = "Installation corrupted, reinstalling..."
+	m.startingDeadline = time.Time{}
 	m.mu.Unlock()
 
 	if err := m.reinstallFromImage(); err != nil {
@@ -116,6 +144,7 @@ func (m *Monitor) checkAndRepairInstallation() {
 		m.mu.Lock()
 		m.status = StatusCrashed
 		m.lastError = fmt.Sprintf("Failed to reinstall: %v", err)
+		m.startingDeadline = time.Time{}
 		m.crashCount++
 		m.mu.Unlock()
 		return
@@ -127,6 +156,7 @@ func (m *Monitor) checkAndRepairInstallation() {
 	m.mu.Lock()
 	m.status = StatusStopped
 	m.lastError = ""
+	m.startingDeadline = time.Time{}
 	m.mu.Unlock()
 }
 
@@ -136,6 +166,18 @@ type packageManifest struct {
 
 type buildInfo struct {
 	Commit string `json:"commit"`
+}
+
+type entrypointCopyProgress struct {
+	Source        string `json:"source"`
+	Stage         string `json:"stage"`
+	Percent       int    `json:"percent"`
+	CopiedEntries int    `json:"copiedEntries"`
+	TotalEntries  int    `json:"totalEntries"`
+	CopiedBytes   int64  `json:"copiedBytes"`
+	TotalBytes    int64  `json:"totalBytes"`
+	Done          bool   `json:"done"`
+	UpdatedAt     string `json:"updatedAt"`
 }
 
 func readPackageVersion(path string) (string, error) {
@@ -230,7 +272,141 @@ func (m *Monitor) evaluateInstallSyncRequirement() {
 	}
 }
 
+func (m *Monitor) setCopyStateStart(source, stage string) {
+	m.mu.Lock()
+	m.copyInProgress = true
+	m.copySource = source
+	m.copyStage = stage
+	m.copyTotalEntries = 0
+	m.copyCopiedEntries = 0
+	m.copyTotalBytes = 0
+	m.copyCopiedBytes = 0
+	m.copyPercent = 0
+	m.copyUpdatedAt = time.Now()
+	m.mu.Unlock()
+}
+
+func (m *Monitor) setCopyStateTotals(totalEntries int, totalBytes int64) {
+	m.mu.Lock()
+	m.copyTotalEntries = totalEntries
+	m.copyTotalBytes = totalBytes
+	m.copyPercent = 0
+	m.copyUpdatedAt = time.Now()
+	m.mu.Unlock()
+}
+
+func (m *Monitor) updateCopyProgress(copiedEntries int, copiedBytes int64, stage string) {
+	percent := 0
+	if copiedEntries > 0 {
+		percent = 1
+	}
+
+	m.mu.Lock()
+	m.copyCopiedEntries = copiedEntries
+	m.copyCopiedBytes = copiedBytes
+	if stage != "" {
+		m.copyStage = stage
+	}
+	if m.copyTotalBytes > 0 {
+		percent = int((copiedBytes * 100) / m.copyTotalBytes)
+	} else if m.copyTotalEntries > 0 {
+		percent = int((copiedEntries * 100) / m.copyTotalEntries)
+	}
+	if percent > 99 {
+		percent = 99
+	}
+	if percent < 0 {
+		percent = 0
+	}
+	m.copyPercent = percent
+	m.copyUpdatedAt = time.Now()
+	m.mu.Unlock()
+}
+
+func (m *Monitor) setCopyStateDone(stage string) {
+	m.mu.Lock()
+	m.copyInProgress = false
+	if stage != "" {
+		m.copyStage = stage
+	}
+	if m.copyTotalEntries > 0 {
+		m.copyCopiedEntries = m.copyTotalEntries
+	}
+	if m.copyTotalBytes > 0 {
+		m.copyCopiedBytes = m.copyTotalBytes
+	}
+	m.copyPercent = 100
+	m.copyUpdatedAt = time.Now()
+	m.mu.Unlock()
+}
+
+func (m *Monitor) clearCopyState() {
+	m.mu.Lock()
+	m.copyInProgress = false
+	m.copySource = ""
+	m.copyStage = ""
+	m.copyTotalEntries = 0
+	m.copyCopiedEntries = 0
+	m.copyTotalBytes = 0
+	m.copyCopiedBytes = 0
+	m.copyPercent = 0
+	m.copyUpdatedAt = time.Time{}
+	m.mu.Unlock()
+}
+
+func (m *Monitor) loadEntrypointCopyProgress(info map[string]interface{}) {
+	raw, err := os.ReadFile(EntrypointCopyState)
+	if err != nil {
+		return
+	}
+
+	var progress entrypointCopyProgress
+	if err := json.Unmarshal(raw, &progress); err != nil {
+		return
+	}
+
+	showAsActive := !progress.Done && progress.Percent < 100
+
+	updatedAt, parseErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(progress.UpdatedAt))
+	if parseErr == nil {
+		age := time.Since(updatedAt)
+		if age > 20*time.Second {
+			return
+		}
+		if progress.Done && age <= 8*time.Second {
+			showAsActive = true
+		}
+		info["copyUpdatedAt"] = updatedAt.Format(time.RFC3339Nano)
+	}
+
+	copiedBytes := progress.CopiedBytes
+	totalBytes := progress.TotalBytes
+	if copiedBytes <= 0 && progress.CopiedEntries > 0 {
+		copiedBytes = int64(progress.CopiedEntries)
+	}
+	if totalBytes <= 0 && progress.TotalEntries > 0 {
+		totalBytes = int64(progress.TotalEntries)
+	}
+
+	info["copyInProgress"] = showAsActive
+	info["copySource"] = strings.TrimSpace(progress.Source)
+	info["copyStage"] = strings.TrimSpace(progress.Stage)
+	info["copyPercent"] = progress.Percent
+	info["copyCopiedEntries"] = progress.CopiedEntries
+	info["copyTotalEntries"] = progress.TotalEntries
+	info["copyCopiedBytes"] = copiedBytes
+	info["copyTotalBytes"] = totalBytes
+}
+
 func (m *Monitor) reinstallFromImage() error {
+	m.setCopyStateStart("tower", "准备复制 OpenClaw 安装")
+	copyCompleted := false
+	defer func() {
+		if !copyCompleted {
+			m.clearCopyState()
+		}
+	}()
+
 	if err := os.RemoveAll(OpenClawDir); err != nil {
 		return fmt.Errorf("remove existing install: %w", err)
 	}
@@ -239,21 +415,132 @@ func (m *Monitor) reinstallFromImage() error {
 		return fmt.Errorf("create install parent dir: %w", err)
 	}
 
-	if err := m.copyDir(ImageDir, OpenClawDir); err != nil {
+	if err := m.copyDirWithProgress(ImageDir, OpenClawDir); err != nil {
 		return fmt.Errorf("copy image install: %w", err)
+	}
+	m.setCopyStateDone("复制完成")
+
+	if _, err := m.ensureOpenClawExecutable(); err != nil {
+		return err
+	}
+
+	copyCompleted = true
+	return nil
+}
+
+func (m *Monitor) ensureOpenClawExecutable() (string, error) {
+	entryPath, err := m.resolveOpenClawEntryPath()
+	if err != nil {
+		return "", err
 	}
 
 	if err := os.MkdirAll(filepath.Dir(OpenClawBin), 0755); err != nil {
-		return fmt.Errorf("create bin dir: %w", err)
+		return "", fmt.Errorf("create bin dir: %w", err)
 	}
 
-	_ = os.Remove(OpenClawBin)
-	if err := os.Symlink(filepath.Join(OpenClawDir, "openclaw.mjs"), OpenClawBin); err != nil {
-		m.addLog(fmt.Sprintf("[tower] Failed to create symlink: %v", err))
-		// Not fatal: npm-global/bin may already contain a usable wrapper.
+	if err := os.Remove(OpenClawBin); err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("remove stale openclaw bin link: %w", err)
 	}
 
-	return nil
+	wrapper := fmt.Sprintf("#!/bin/sh\nexec node %s \"$@\"\n", shellSingleQuote(entryPath))
+	if err := os.WriteFile(OpenClawBin, []byte(wrapper), 0755); err != nil {
+		return "", fmt.Errorf("write openclaw bin wrapper: %w", err)
+	}
+
+	if err := os.Chmod(OpenClawBin, 0755); err != nil {
+		return "", fmt.Errorf("chmod openclaw bin wrapper: %w", err)
+	}
+
+	return OpenClawBin, nil
+}
+
+func (m *Monitor) resolveOpenClawEntryPath() (string, error) {
+	candidates := []string{
+		filepath.Join(OpenClawDir, "dist", "entry.js"),
+	}
+
+	raw, err := os.ReadFile(OpenClawPackagePath)
+	if err == nil {
+		var manifest struct {
+			Bin any `json:"bin"`
+		}
+		if jsonErr := json.Unmarshal(raw, &manifest); jsonErr == nil {
+			switch bin := manifest.Bin.(type) {
+			case string:
+				if path := resolveOpenClawRelativeEntry(bin); path != "" {
+					candidates = append(candidates, path)
+				}
+			case map[string]any:
+				if value, ok := bin["openclaw"].(string); ok {
+					if path := resolveOpenClawRelativeEntry(value); path != "" {
+						candidates = append(candidates, path)
+					}
+				}
+			}
+		}
+	}
+
+	candidates = append(candidates,
+		filepath.Join(OpenClawDir, "openclaw.mjs"),
+	)
+
+	checked := make([]string, 0, len(candidates))
+	seen := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		if _, exists := seen[candidate]; exists {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		checked = append(checked, candidate)
+
+		stat, statErr := os.Stat(candidate)
+		if statErr == nil && !stat.IsDir() {
+			if isShellWrapperFile(candidate) {
+				continue
+			}
+			return candidate, nil
+		}
+	}
+
+	return "", fmt.Errorf("openclaw entry not found under %s (checked: %s)", OpenClawDir, strings.Join(checked, ", "))
+}
+
+func isShellWrapperFile(path string) bool {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	if len(raw) == 0 {
+		return false
+	}
+	firstLine := string(raw)
+	if idx := strings.IndexByte(firstLine, '\n'); idx >= 0 {
+		firstLine = firstLine[:idx]
+	}
+	firstLine = strings.TrimSpace(firstLine)
+	return firstLine == "#!/bin/sh" || firstLine == "#!/usr/bin/env sh"
+}
+
+func resolveOpenClawRelativeEntry(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	if filepath.IsAbs(trimmed) {
+		return ""
+	}
+	cleaned := filepath.Clean(trimmed)
+	if cleaned == "." || strings.HasPrefix(cleaned, "..") {
+		return ""
+	}
+	return filepath.Join(OpenClawDir, cleaned)
+}
+
+func shellSingleQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 func (m *Monitor) SyncInstallToLatest() error {
@@ -266,6 +553,7 @@ func (m *Monitor) SyncInstallToLatest() error {
 	m.awaitingReturn = false
 	m.lastRestartReason = ""
 	m.userConfirmed = false
+	m.startingDeadline = time.Time{}
 	m.mu.Unlock()
 
 	if shouldRestart {
@@ -274,6 +562,7 @@ func (m *Monitor) SyncInstallToLatest() error {
 			m.mu.Lock()
 			m.status = StatusCrashed
 			m.lastError = fmt.Sprintf("Failed to stop OpenClaw for sync: %v", err)
+			m.startingDeadline = time.Time{}
 			m.crashCount++
 			m.mu.Unlock()
 			return err
@@ -284,6 +573,7 @@ func (m *Monitor) SyncInstallToLatest() error {
 		m.mu.Lock()
 		m.status = StatusCrashed
 		m.lastError = err.Error()
+		m.startingDeadline = time.Time{}
 		m.crashCount++
 		m.mu.Unlock()
 		m.addLog(fmt.Sprintf("[tower] Sync failed: %v", err))
@@ -306,21 +596,84 @@ func (m *Monitor) SyncInstallToLatest() error {
 	m.lastError = ""
 	m.awaitingReturn = false
 	m.lastRestartReason = ""
+	m.startingDeadline = time.Time{}
 	m.mu.Unlock()
 
 	m.addLog("[tower] Sync complete; OpenClaw remains stopped")
 	return nil
 }
 
-// copyDir recursively copies a directory
-func (m *Monitor) copyDir(src, dst string) error {
-	// Use cp -r for simplicity
-	cmd := exec.Command("cp", "-r", src, dst)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%v: %s", err, string(output))
+// copyDirWithProgress copies installation files using cp -a and reports progress by polling target size.
+func (m *Monitor) copyDirWithProgress(src, dst string) error {
+	totalBytes, err := dirSizeBytes(src)
+	if err != nil || totalBytes <= 0 {
+		totalBytes = 1
 	}
-	return nil
+	m.setCopyStateTotals(0, totalBytes)
+	m.updateCopyProgress(0, 0, "正在复制文件")
+
+	if err := os.MkdirAll(dst, 0755); err != nil {
+		return fmt.Errorf("create destination root: %w", err)
+	}
+
+	// Use src/. to copy directory contents into dst directly.
+	// filepath.Join(src, ".") collapses to src and would create dst/<basename(src)>.
+	srcContents := filepath.Clean(src) + string(os.PathSeparator) + "."
+	cmd := exec.Command("cp", "-a", srcContents, dst)
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start cp -a: %w", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case err := <-done:
+			if err != nil {
+				return fmt.Errorf("cp -a failed: %w", err)
+			}
+			copiedBytes, sizeErr := dirSizeBytes(dst)
+			if sizeErr != nil || copiedBytes <= 0 {
+				copiedBytes = totalBytes
+			}
+			if copiedBytes > totalBytes {
+				copiedBytes = totalBytes
+			}
+			m.updateCopyProgress(0, copiedBytes, "复制完成")
+			return nil
+		case <-ticker.C:
+			copiedBytes, sizeErr := dirSizeBytes(dst)
+			if sizeErr != nil {
+				continue
+			}
+			if copiedBytes > totalBytes {
+				copiedBytes = totalBytes
+			}
+			m.updateCopyProgress(0, copiedBytes, "正在复制文件")
+		}
+	}
+}
+
+func dirSizeBytes(path string) (int64, error) {
+	out, err := exec.Command("du", "-sb", path).Output()
+	if err != nil {
+		return 0, err
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) == 0 {
+		return 0, fmt.Errorf("unexpected du output for %s", path)
+	}
+	size, err := strconv.ParseInt(fields[0], 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	return size, nil
 }
 
 func (m *Monitor) GetStatus() Status {
@@ -339,13 +692,29 @@ func (m *Monitor) GetStatusInfo() map[string]interface{} {
 		"awaitingReturn":    m.awaitingReturn,
 		"updateRequired":    m.updateRequired,
 		"updateReason":      m.updateReason,
+		"copyInProgress":    m.copyInProgress,
+		"copySource":        m.copySource,
+		"copyStage":         m.copyStage,
+		"copyTotalEntries":  m.copyTotalEntries,
+		"copyCopiedEntries": m.copyCopiedEntries,
+		"copyTotalBytes":    m.copyTotalBytes,
+		"copyCopiedBytes":   m.copyCopiedBytes,
+		"copyPercent":       m.copyPercent,
 		"crashCount":        m.crashCount,
 		"lastError":         m.lastError,
 		"lastRestartReason": m.lastRestartReason,
 	}
 
+	if !m.copyUpdatedAt.IsZero() {
+		info["copyUpdatedAt"] = m.copyUpdatedAt.Format(time.RFC3339Nano)
+	}
+
 	if !m.startTime.IsZero() {
 		info["uptime"] = time.Since(m.startTime).Seconds()
+	}
+
+	if !m.copyInProgress && strings.TrimSpace(m.copySource) == "" {
+		m.loadEntrypointCopyProgress(info)
 	}
 
 	return info
@@ -421,6 +790,51 @@ func (m *Monitor) IsUpdateRequired() bool {
 	return m.updateRequired
 }
 
+// PromoteRunningIfReachable probes gateway liveness and updates status to running when reachable.
+// This is used by explicit operator actions (for example "confirm return") to avoid stale status.
+func (m *Monitor) PromoteRunningIfReachable() bool {
+	url := fmt.Sprintf("http://localhost:%s/health", m.config.OpenClawPort)
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(url)
+
+	healthErr := err
+	if resp != nil {
+		defer resp.Body.Close()
+		io.Copy(io.Discard, resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			healthErr = fmt.Errorf("health endpoint returned status %d", resp.StatusCode)
+		}
+	}
+
+	reachable := healthErr == nil
+	if !reachable {
+		reachable = isTCPPortReachable("127.0.0.1", m.config.OpenClawPort, 1200*time.Millisecond)
+	}
+	if !reachable {
+		return false
+	}
+
+	m.mu.Lock()
+	wasRunning := m.status == StatusRunning
+	m.status = StatusRunning
+	m.lastError = ""
+	m.startingDeadline = time.Time{}
+	if m.startTime.IsZero() {
+		m.startTime = time.Now()
+	}
+	m.mu.Unlock()
+
+	if !wasRunning {
+		if healthErr == nil {
+			m.addLog("[tower] Gateway liveness probe succeeded; status promoted to running")
+		} else {
+			m.addLog(fmt.Sprintf("[tower] Gateway port is reachable during confirm probe (health unavailable: %v)", healthErr))
+		}
+	}
+
+	return true
+}
+
 func (m *Monitor) StartOpenClaw() error {
 	m.mu.Lock()
 	if m.status == StatusRunning || m.status == StatusStarting {
@@ -439,14 +853,20 @@ func (m *Monitor) StopOpenClaw() error {
 		m.status = StatusStopped
 		m.awaitingReturn = false
 		m.lastRestartReason = ""
+		m.startingDeadline = time.Time{}
 		m.mu.Unlock()
 		return nil
 	}
 
 	cmd := m.cmd
+	cmdDone := m.cmdDone
 	m.mu.Unlock()
 
 	m.addLog("[tower] Stopping OpenClaw...")
+
+	m.mu.Lock()
+	m.stopRequested = true
+	m.mu.Unlock()
 
 	// Send SIGTERM first
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
@@ -454,35 +874,63 @@ func (m *Monitor) StopOpenClaw() error {
 		m.mu.Lock()
 		m.status = StatusStopped
 		m.cmd = nil
+		m.startingDeadline = time.Time{}
 		m.mu.Unlock()
 		return nil
 	}
 
-	// Wait a bit for graceful shutdown
-	done := make(chan error, 1)
-	go func() {
-		done <- cmd.Wait()
-	}()
-
-	select {
-	case <-done:
+	if cmdDone == nil {
+		m.addLog("[tower] Stop requested but process watcher channel missing; continuing without wait")
 		m.mu.Lock()
 		m.status = StatusStopped
 		m.cmd = nil
 		m.awaitingReturn = false
 		m.lastRestartReason = ""
+		m.stopRequested = false
+		m.startingDeadline = time.Time{}
+		m.mu.Unlock()
+		return nil
+	}
+
+	select {
+	case <-cmdDone:
+		m.mu.Lock()
+		m.status = StatusStopped
+		m.cmd = nil
+		m.cmdDone = nil
+		m.awaitingReturn = false
+		m.lastRestartReason = ""
+		m.stopRequested = false
+		m.startingDeadline = time.Time{}
 		m.mu.Unlock()
 		m.addLog("[tower] OpenClaw stopped gracefully")
 	case <-time.After(5 * time.Second):
 		// Force kill
 		cmd.Process.Kill()
-		m.mu.Lock()
-		m.status = StatusStopped
-		m.cmd = nil
-		m.awaitingReturn = false
-		m.lastRestartReason = ""
-		m.mu.Unlock()
-		m.addLog("[tower] OpenClaw force killed (timeout)")
+		select {
+		case <-cmdDone:
+			m.mu.Lock()
+			m.status = StatusStopped
+			m.cmd = nil
+			m.cmdDone = nil
+			m.awaitingReturn = false
+			m.lastRestartReason = ""
+			m.stopRequested = false
+			m.startingDeadline = time.Time{}
+			m.mu.Unlock()
+			m.addLog("[tower] OpenClaw force killed after timeout")
+		case <-time.After(3 * time.Second):
+			m.mu.Lock()
+			m.status = StatusStopped
+			m.cmd = nil
+			m.cmdDone = nil
+			m.awaitingReturn = false
+			m.lastRestartReason = ""
+			m.stopRequested = false
+			m.startingDeadline = time.Time{}
+			m.mu.Unlock()
+			m.addLog("[tower] OpenClaw force kill requested; process exit not observed in time")
+		}
 	}
 
 	return nil
@@ -494,12 +942,24 @@ func (m *Monitor) startOpenClaw() error {
 	m.lastError = ""
 	m.awaitingReturn = false
 	m.lastRestartReason = ""
+	m.startingDeadline = time.Now().Add(startupHealthTimeout)
 	m.mu.Unlock()
 
 	m.addLog("[tower] Starting OpenClaw...")
 
-	// Build command - use the openclaw binary
-	cmd := exec.Command("openclaw", "gateway", "run", "--bind", "lan", "--port", m.config.OpenClawPort)
+	binPath, err := m.ensureOpenClawExecutable()
+	if err != nil {
+		m.mu.Lock()
+		m.status = StatusCrashed
+		m.lastError = err.Error()
+		m.startingDeadline = time.Time{}
+		m.mu.Unlock()
+		m.addLog(fmt.Sprintf("[tower] Failed to prepare OpenClaw executable: %v", err))
+		return err
+	}
+
+	// Build command using absolute binary path to avoid PATH drift issues.
+	cmd := exec.Command(binPath, "gateway", "run", "--bind", "lan", "--port", m.config.OpenClawPort)
 	cmd.Env = os.Environ()
 
 	// Capture stdout
@@ -520,6 +980,7 @@ func (m *Monitor) startOpenClaw() error {
 		m.mu.Lock()
 		m.status = StatusCrashed
 		m.lastError = err.Error()
+		m.startingDeadline = time.Time{}
 		m.mu.Unlock()
 		m.addLog(fmt.Sprintf("[tower] Failed to start OpenClaw: %v", err))
 		return err
@@ -527,6 +988,8 @@ func (m *Monitor) startOpenClaw() error {
 
 	m.mu.Lock()
 	m.cmd = cmd
+	m.cmdDone = make(chan error, 1)
+	m.stopRequested = false
 	m.startTime = time.Now()
 	m.mu.Unlock()
 
@@ -541,25 +1004,53 @@ func (m *Monitor) startOpenClaw() error {
 		err := cmd.Wait()
 
 		m.mu.Lock()
-		if err != nil {
-			m.status = StatusCrashed
-			m.lastError = err.Error()
-			m.crashCount++
-			m.userConfirmed = false // Reset confirmation on crash
-			m.awaitingReturn = false
-			m.lastRestartReason = ""
-		} else {
+		cmdDone := m.cmdDone
+		if cmdDone != nil {
+			select {
+			case cmdDone <- err:
+			default:
+			}
+		}
+		wasStopRequested := m.stopRequested
+
+		if wasStopRequested {
 			m.status = StatusStopped
 			m.awaitingReturn = false
+			m.lastRestartReason = ""
+			m.startingDeadline = time.Time{}
+			m.lastError = ""
+		} else {
+			// OpenClaw can restart itself and drop the original child handle.
+			// Keep status in "starting" and let health checks determine real liveness.
+			m.status = StatusStarting
+			m.userConfirmed = false
+			if m.lastRestartReason == "" {
+				m.lastRestartReason = "Gateway process exited; waiting for health check"
+			}
+			m.awaitingReturn = true
+			m.startingDeadline = time.Now().Add(startupHealthTimeout)
+			if err != nil {
+				m.lastError = err.Error()
+			} else {
+				m.lastError = ""
+			}
 		}
 		m.cmd = nil
+		m.cmdDone = nil
+		m.stopRequested = false
 		m.mu.Unlock()
 
 		// Log outside of lock
-		if err != nil {
-			m.addLog(fmt.Sprintf("[tower] OpenClaw crashed: %v", err))
+		if wasStopRequested {
+			if err != nil {
+				m.addLog(fmt.Sprintf("[tower] OpenClaw stopped: %v", err))
+			} else {
+				m.addLog("[tower] OpenClaw exited normally")
+			}
+		} else if err != nil {
+			m.addLog(fmt.Sprintf("[tower] OpenClaw process exited (%v); waiting for health check", err))
 		} else {
-			m.addLog("[tower] OpenClaw exited normally")
+			m.addLog("[tower] OpenClaw process exited; waiting for health check")
 		}
 	}()
 
@@ -599,6 +1090,7 @@ func (m *Monitor) trackRestartIntent(line string) {
 	m.awaitingReturn = true
 	m.userConfirmed = false
 	m.status = StatusStarting
+	m.startingDeadline = time.Now().Add(startupHealthTimeout)
 	m.lastRestartReason = reason
 	m.mu.Unlock()
 
@@ -608,47 +1100,90 @@ func (m *Monitor) trackRestartIntent(line string) {
 }
 
 func (m *Monitor) checkHealth() {
-	m.mu.RLock()
-	status := m.status
-	m.mu.RUnlock()
-
-	// Only check if we think it should be running
-	if status != StatusStarting && status != StatusRunning {
-		return
-	}
-
-	// HTTP health check
+	// HTTP health check is the source of truth for liveness; process handles are advisory.
 	url := fmt.Sprintf("http://localhost:%s/health", m.config.OpenClawPort)
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Get(url)
 
-	if err != nil {
+	healthErr := err
+	if resp != nil {
+		defer resp.Body.Close()
+		io.Copy(io.Discard, resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			healthErr = fmt.Errorf("health endpoint returned status %d", resp.StatusCode)
+		}
+	}
+
+	portReachable := false
+	if healthErr != nil {
+		portReachable = isTCPPortReachable("127.0.0.1", m.config.OpenClawPort, 1200*time.Millisecond)
+	}
+
+	if healthErr == nil || portReachable {
 		m.mu.Lock()
-		if m.status == StatusStarting {
-			// Still starting, give it time
+		wasRunning := m.status == StatusRunning
+		m.status = StatusRunning
+		m.lastError = ""
+		m.startingDeadline = time.Time{}
+		if !wasRunning || m.startTime.IsZero() {
+			m.startTime = time.Now()
+		}
+		m.mu.Unlock()
+		if !wasRunning {
+			if healthErr == nil {
+				m.addLog("[tower] OpenClaw is now healthy")
+			} else {
+				m.addLog(fmt.Sprintf("[tower] OpenClaw port is reachable (health check unavailable: %v)", healthErr))
+			}
+		}
+		return
+	}
+
+	m.mu.Lock()
+	switch m.status {
+	case StatusStarting:
+		// During install/sync copy we intentionally stay in starting while /health is unavailable.
+		if m.copyInProgress {
 			m.mu.Unlock()
 			return
 		}
-		// Was running, now crashed
+		// Starting without a deadline means we are in a non-runtime phase (for example sync/copy).
+		if m.startingDeadline.IsZero() || time.Now().Before(m.startingDeadline) {
+			m.mu.Unlock()
+			return
+		}
 		m.status = StatusCrashed
-		m.lastError = err.Error()
+		m.lastError = healthErr.Error()
+		m.startingDeadline = time.Time{}
 		m.crashCount++
 		m.userConfirmed = false
 		m.awaitingReturn = false
 		m.lastRestartReason = ""
 		m.mu.Unlock()
-		m.addLog(fmt.Sprintf("[tower] Health check failed: %v", err))
+		m.addLog(fmt.Sprintf("[tower] Health check failed after startup timeout: %v", healthErr))
+		return
+	case StatusRunning:
+		m.status = StatusCrashed
+		m.lastError = healthErr.Error()
+		m.startingDeadline = time.Time{}
+		m.crashCount++
+		m.userConfirmed = false
+		m.awaitingReturn = false
+		m.lastRestartReason = ""
+		m.mu.Unlock()
+		m.addLog(fmt.Sprintf("[tower] Health check failed: %v", healthErr))
+		return
+	default:
+		m.mu.Unlock()
 		return
 	}
-	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
+}
 
-	if resp.StatusCode == http.StatusOK {
-		m.mu.Lock()
-		if m.status != StatusRunning {
-			m.status = StatusRunning
-			m.addLog("[tower] OpenClaw is now healthy")
-		}
-		m.mu.Unlock()
+func isTCPPortReachable(host, port string, timeout time.Duration) bool {
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), timeout)
+	if err != nil {
+		return false
 	}
+	_ = conn.Close()
+	return true
 }

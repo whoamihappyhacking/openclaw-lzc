@@ -131,6 +131,45 @@ body {
   color: var(--text-secondary);
 }
 
+.copy-progress {
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-tertiary);
+}
+
+.copy-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.copy-progress-track {
+  margin-top: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.copy-progress-fill {
+  height: 100%;
+  width: 0;
+  background: linear-gradient(90deg, var(--accent), #60a5fa);
+  transition: width 0.2s ease;
+}
+
+.copy-progress-meta {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
 /* Section Header */
 .section-header {
   display: flex;
@@ -232,6 +271,41 @@ body {
   gap: 10px;
 }
 
+.confirm-actions-row {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.confirm-actions-row.dual-actions {
+  flex-direction: row;
+  align-items: stretch;
+  margin-top: 6px;
+  padding-top: 4px;
+  gap: 12px;
+}
+
+.confirm-actions-row.sync-only {
+  margin-top: 6px;
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+
+.confirm-actions-row.dual-actions .sync-btn {
+  order: 1;
+}
+
+.confirm-actions-row.dual-actions .confirm-btn {
+  order: 2;
+}
+
+.confirm-actions-row.dual-actions .sync-btn,
+.confirm-actions-row.dual-actions .confirm-btn {
+  width: auto;
+  flex: 1;
+}
+
 .update-explain {
   width: 100%;
   background: rgba(59, 130, 246, 0.08);
@@ -320,6 +394,102 @@ body {
 
 .sync-btn svg {
   flex-shrink: 0;
+}
+
+/* Danger confirm modal */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.modal-card {
+  width: 100%;
+  max-width: 520px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-hover);
+  border-radius: 12px;
+  padding: 16px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+
+.modal-title {
+  font-size: 17px;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+
+.modal-message {
+  font-size: 14px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.modal-tip {
+  margin-top: 12px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.modal-tip code {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 6px;
+  color: var(--warning);
+}
+
+.modal-input {
+  margin-top: 10px;
+  width: 100%;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-primary);
+  padding: 10px 12px;
+  font-size: 14px;
+  outline: none;
+}
+
+.modal-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+}
+
+.modal-actions {
+  margin-top: 14px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.modal-btn {
+  border: 1px solid var(--border);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.modal-btn:hover {
+  border-color: var(--border-hover);
+}
+
+.modal-btn-danger {
+  border-color: rgba(239, 68, 68, 0.6);
+  color: var(--danger);
+}
+
+.modal-btn-danger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* Logs Section */
