@@ -254,8 +254,10 @@ func (h *Handler) handleRestoreDefault(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleConfirmReady(w http.ResponseWriter, r *http.Request) {
 	if h.config.Monitor.IsUpdateRequired() {
-		h.jsonError(w, "Update required; please sync to latest OpenClaw first", http.StatusBadRequest)
-		return
+		if h.config.Monitor.GetStatus() != monitor.StatusRunning && !h.config.Monitor.PromoteRunningIfReachable() {
+			h.jsonError(w, "Update required; please sync to latest OpenClaw first", http.StatusBadRequest)
+			return
+		}
 	}
 
 	h.config.Monitor.SetUserConfirmed(true)
