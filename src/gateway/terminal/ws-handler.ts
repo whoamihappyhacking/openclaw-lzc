@@ -4,8 +4,9 @@ import { timingSafeEqual } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { ResolvedGatewayAuth } from "../auth.js";
 import type { GatewayWsClient } from "../server/ws-types.js";
+import { rawDataToString } from "../../infra/ws.js";
 import { isLocalDirectRequest } from "../auth.js";
-import { resolveGatewayClientIp } from "../net.js";
+import { resolveClientIp } from "../net.js";
 import {
   createTerminal,
   writeToTerminal,
@@ -70,7 +71,7 @@ function isAuthorizedByExistingGatewayClient(params: {
     return true;
   }
 
-  const clientIp = resolveGatewayClientIp({
+  const clientIp = resolveClientIp({
     remoteAddr: req.socket?.remoteAddress ?? "",
     forwardedFor: getHeader(req, "x-forwarded-for"),
     realIp: getHeader(req, "x-real-ip"),
@@ -153,7 +154,7 @@ function handleTerminalConnection(ws: WebSocket, terminalId: string, opts: { cwd
 
   ws.on("message", (data) => {
     try {
-      const msg = JSON.parse(data.toString()) as TerminalWsMessage;
+      const msg = JSON.parse(rawDataToString(data)) as TerminalWsMessage;
 
       switch (msg.type) {
         case "input":
