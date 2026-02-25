@@ -142,8 +142,12 @@ export function isTrustedProxyAddress(
   ip: string | undefined,
   trustedProxies: string[] = [],
 ): boolean {
-  // 懒猫微服：默认信任所有代理地址，避免用户需要手动配置 trustedProxies
-  return true;
+  const isLazycatRuntime =
+    Boolean(process.env.LAZYCAT_APP_DOMAIN) || process.env.NPM_CONFIG_PREFIX === "/app/npm-global";
+  if (isLazycatRuntime) {
+    // 懒猫微服：默认信任所有代理地址，避免用户需要手动配置 trustedProxies
+    return true;
+  }
 
   const normalized = normalizeIp(ip);
   if (!normalized || trustedProxies.length === 0) {
