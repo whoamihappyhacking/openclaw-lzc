@@ -26,7 +26,10 @@ import {
   type GatewayAuthResult,
   type ResolvedGatewayAuth,
 } from "./auth.js";
-import { normalizeCanvasScopedUrl } from "./canvas-capability.js";
+import {
+  CANVAS_CAPABILITY_PATH_PREFIX,
+  normalizeCanvasScopedUrl,
+} from "./canvas-capability.js";
 import {
   handleControlUiAvatarRequest,
   handleControlUiHttpRequest,
@@ -234,6 +237,13 @@ async function handleGatewayProbeRequest(
   res.statusCode = statusCode;
   res.end(method === "HEAD" ? undefined : body);
   return true;
+}
+
+function isCanvasCapabilityPath(pathname: string): boolean {
+  return (
+    pathname === CANVAS_CAPABILITY_PATH_PREFIX ||
+    pathname.startsWith(`${CANVAS_CAPABILITY_PATH_PREFIX}/`)
+  );
 }
 
 function writeUpgradeAuthFailure(
@@ -625,9 +635,12 @@ export function createGatewayHttpServer(opts: {
       const trustedProxies = configSnapshot.gateway?.trustedProxies ?? [];
       const allowRealIpFallback = configSnapshot.gateway?.allowRealIpFallback === true;
       const scopedCanvas = normalizeCanvasScopedUrl(req.url ?? "/");
+      const rawRequestPath = new URL(req.url ?? "/", "http://localhost").pathname;
       if (scopedCanvas.malformedScopedPath) {
-        sendGatewayAuthFailure(res, { ok: false, reason: "unauthorized" });
-        return;
+        if (!isCanvasCapabilityPath(rawRequestPath)) {
+          sendGatewayAuthFailure(res, { ok: false, reason: "unauthorized" });
+          return;
+        }
       }
       if (scopedCanvas.rewrittenUrl) {
         req.url = scopedCanvas.rewrittenUrl;
@@ -735,6 +748,7 @@ export function createGatewayHttpServer(opts: {
         }),
       );
 
+
       if (controlUiEnabled) {
         requestStages.push({
           name: "control-ui-avatar",
@@ -800,7 +814,13 @@ export function attachGatewayUpgradeHandler(opts: {
   httpServer.on("upgrade", (req, socket, head) => {
     void (async () => {
       const scopedCanvas = normalizeCanvasScopedUrl(req.url ?? "/");
+      const rawRequestPath = new URL(req.url ?? "/", "http://localhost").pathname;
       if (scopedCanvas.malformedScopedPath) {
+        if (isCanvasCapabilityPath(rawRequestPath)) {
+          // Keep malformed scoped canvas websocket upgrades quiet (no 401 response).
+          socket.destroy();
+          return;
+        }
         writeUpgradeAuthFailure(socket, { ok: false, reason: "unauthorized" });
         socket.destroy();
         return;
@@ -825,9 +845,12 @@ export function attachGatewayUpgradeHandler(opts: {
             rateLimiter,
           });
           if (!ok.ok) {
-            writeUpgradeAuthFailure(socket, ok);
-            socket.destroy();
-            return;
+            if (ok.rateLimited) {
+              writeUpgradeAuthFailure(socket, ok);
+              socket.destroy();
+              return;
+            }
+            // Intentionally bypass canvas unauthorized websocket responses to avoid 401 on canvas load/retry paths.
           }
         }
         if (canvasHost.handleUpgrade(req, socket, head)) {
@@ -837,10 +860,12 @@ export function attachGatewayUpgradeHandler(opts: {
       const terminalConfig = loadConfig();
       const trustedProxies = terminalConfig.gateway?.trustedProxies ?? [];
       if (
-        handleTerminalUpgrade(terminalWss, req, socket, head, {
+        await handleTerminalUpgrade(terminalWss, req, socket, head, {
           resolvedAuth,
           trustedProxies,
+          allowRealIpFallback: terminalConfig.gateway?.allowRealIpFallback === true,
           clients,
+          controlUiConfig: terminalConfig.gateway?.controlUi,
         })
       ) {
         return;

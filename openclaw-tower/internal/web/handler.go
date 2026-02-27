@@ -24,25 +24,9 @@ import (
 //go:embed default-config.json
 var defaultConfig string
 
-// Tower health check script to inject into proxied HTML responses
-const towerHealthCheckScript = `<script>
-(function(){
-  var checkInterval = setInterval(function(){
-    fetch('/tower/status').then(function(r){return r.json()}).then(function(d){
-      // Return to Tower UI when gateway is down, crashed, awaiting manual return, or update is required
-      if((d.updateRequired&&!d.userConfirmed)||d.awaitingReturn||d.status==='crashed'||d.status==='stopped'){
-        clearInterval(checkInterval);
-        location.reload();
-      }
-      // If running but crashed before and not confirmed, also reload to recovery UI
-      if(d.status==='running'&&d.crashCount>0&&!d.userConfirmed){
-        clearInterval(checkInterval);
-        location.reload();
-      }
-    }).catch(function(){});
-  }, 2000);
-})();
-</script>`
+// Tower health check script tag injected into proxied HTML responses.
+// Use an external same-origin script to respect Control UI CSP (script-src 'self').
+const towerHealthCheckScriptTag = `<script src="/tower/static/health-check.js" defer></script>`
 
 type Config struct {
 	Monitor      *monitor.Monitor
@@ -104,15 +88,15 @@ func NewHandler(cfg Config) *Handler {
 		htmlStr := string(htmlBody)
 
 		if idx := strings.LastIndex(strings.ToLower(htmlStr), "</body>"); idx != -1 {
-			htmlStr = htmlStr[:idx] + towerHealthCheckScript + htmlStr[idx:]
+			htmlStr = htmlStr[:idx] + towerHealthCheckScriptTag + htmlStr[idx:]
 			injected = true
 		} else if idx := strings.LastIndex(strings.ToLower(htmlStr), "</html>"); idx != -1 {
-			htmlStr = htmlStr[:idx] + towerHealthCheckScript + htmlStr[idx:]
+			htmlStr = htmlStr[:idx] + towerHealthCheckScriptTag + htmlStr[idx:]
 			injected = true
 		}
 
 		if !injected {
-			htmlStr += towerHealthCheckScript
+			htmlStr += towerHealthCheckScriptTag
 		}
 
 		newBody := []byte(htmlStr)

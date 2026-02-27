@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>OpenClaw Tower - 修复模式</title>
+    <title>OpenClaw Tower - 防挂模式</title>
     <link rel="stylesheet" href="/tower/static/style.css" />
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css" />
   </head>
@@ -23,20 +23,91 @@
               d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"
             />
           </svg>
-          <span>OpenClaw Tower</span>
+          <div class="logo-text">
+            <span>OpenClaw Tower</span>
+            <span class="logo-subtitle">Recovery Console</span>
+          </div>
         </div>
-        <div class="mode-badge">修复模式</div>
       </header>
 
       <main class="main">
-        <!-- Status Section -->
-        <section class="status-section">
+        <section class="status-actions-section">
           <div class="status-card">
             <div class="status-indicator" id="statusIndicator">
               <span class="status-dot"></span>
               <span class="status-text" id="statusText">检查中...</span>
             </div>
-            <div class="status-details" id="statusDetails"></div>
+            <div class="status-details status-details-empty" id="statusDetails">
+              正在获取运行状态...
+            </div>
+            <div class="actions-panel">
+              <div class="actions-grid">
+                <button class="action-btn action-primary" id="btnStart" onclick="startService()">
+                  <svg
+                    width="20"
+                    height="20"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                  >
+                    <polygon points="5 3 19 12 5 21 5 3" />
+                  </svg>
+                  <span>启动服务</span>
+                </button>
+                <button class="action-btn action-secondary" id="btnStop" onclick="stopService()">
+                  <svg
+                    width="20"
+                    height="20"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                  >
+                    <rect x="6" y="6" width="12" height="12" />
+                  </svg>
+                  <span>停止服务</span>
+                </button>
+                <button
+                  class="action-btn action-warning"
+                  id="btnRestoreBackup"
+                  onclick="restoreBackup()"
+                >
+                  <svg
+                    width="20"
+                    height="20"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                  >
+                    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                    <path d="M3 3v5h5" />
+                  </svg>
+                  <span>恢复备份</span>
+                </button>
+                <button
+                  class="action-btn action-danger"
+                  id="btnRestoreDefault"
+                  onclick="restoreDefault()"
+                >
+                  <svg
+                    width="20"
+                    height="20"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                  >
+                    <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                    <path d="M3 3v5h5" />
+                    <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
+                    <path d="M16 16h5v5" />
+                  </svg>
+                  <span>恢复默认</span>
+                </button>
+              </div>
+            </div>
             <div class="copy-progress" id="copyProgress" style="display: none">
               <div class="copy-progress-head">
                 <span id="copyProgressLabel">正在复制 OpenClaw 安装...</span>
@@ -47,76 +118,6 @@
               </div>
               <div class="copy-progress-meta" id="copyProgressMeta"></div>
             </div>
-          </div>
-        </section>
-
-        <!-- Actions Section -->
-        <section class="actions-section">
-          <div class="actions-grid">
-            <button class="action-btn action-primary" id="btnStart" onclick="startService()">
-              <svg
-                width="20"
-                height="20"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-              >
-                <polygon points="5 3 19 12 5 21 5 3" />
-              </svg>
-              <span>启动服务</span>
-            </button>
-            <button class="action-btn action-secondary" id="btnStop" onclick="stopService()">
-              <svg
-                width="20"
-                height="20"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-              >
-                <rect x="6" y="6" width="12" height="12" />
-              </svg>
-              <span>停止服务</span>
-            </button>
-            <button
-              class="action-btn action-warning"
-              id="btnRestoreBackup"
-              onclick="restoreBackup()"
-            >
-              <svg
-                width="20"
-                height="20"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-              >
-                <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-                <path d="M3 3v5h5" />
-              </svg>
-              <span>恢复备份</span>
-            </button>
-            <button
-              class="action-btn action-danger"
-              id="btnRestoreDefault"
-              onclick="restoreDefault()"
-            >
-              <svg
-                width="20"
-                height="20"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-              >
-                <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-                <path d="M3 3v5h5" />
-                <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
-                <path d="M16 16h5v5" />
-              </svg>
-              <span>恢复默认</span>
-            </button>
           </div>
         </section>
 
@@ -168,6 +169,37 @@
           </div>
         </section>
 
+        <!-- Terminal Section -->
+        <section class="terminal-section" id="terminalSection">
+          <div class="section-header">
+            <h2>💻 终端</h2>
+            <div class="terminal-actions">
+              <span class="terminal-hint">在容器内使用 <code>openclaw</code> 命令调试</span>
+              <button
+                class="terminal-expand-btn"
+                id="btnExpandTerminal"
+                onclick="toggleTerminalExpand()"
+              >
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                >
+                  <polyline points="15 3 21 3 21 9" />
+                  <polyline points="9 21 3 21 3 15" />
+                  <line x1="21" y1="3" x2="14" y2="10" />
+                  <line x1="3" y1="21" x2="10" y2="14" />
+                </svg>
+                <span id="expandBtnText">展开</span>
+              </button>
+            </div>
+          </div>
+          <div class="terminal-container" id="terminal"></div>
+        </section>
+
         <!-- Logs Section -->
         <section class="logs-section" id="logsSection">
           <div class="section-header">
@@ -199,39 +231,8 @@
             </div>
           </div>
           <div class="logs-container" id="logsContainer">
-            <pre id="logsContent">等待日志...</pre>
+            <pre id="logsContent" class="logs-placeholder">等待日志...</pre>
           </div>
-        </section>
-
-        <!-- Terminal Section -->
-        <section class="terminal-section" id="terminalSection">
-          <div class="section-header">
-            <h2>💻 终端</h2>
-            <div class="terminal-actions">
-              <span class="terminal-hint">在容器内使用 <code>openclaw</code> 命令调试</span>
-              <button
-                class="terminal-expand-btn"
-                id="btnExpandTerminal"
-                onclick="toggleTerminalExpand()"
-              >
-                <svg
-                  width="16"
-                  height="16"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                >
-                  <polyline points="15 3 21 3 21 9" />
-                  <polyline points="9 21 3 21 3 15" />
-                  <line x1="21" y1="3" x2="14" y2="10" />
-                  <line x1="3" y1="21" x2="10" y2="14" />
-                </svg>
-                <span id="expandBtnText">展开</span>
-              </button>
-            </div>
-          </div>
-          <div class="terminal-container" id="terminal"></div>
         </section>
       </main>
 

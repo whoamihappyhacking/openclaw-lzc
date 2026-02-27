@@ -21,17 +21,22 @@ import (
 
 const (
 	// OpenClaw installation paths
-	ImageDir            = "/opt/openclaw-image"
-	ImagePackagePath    = ImageDir + "/package.json"
-	ImageBuildInfoPath  = ImageDir + "/dist/build-info.json"
-	ImageEntryJSPath    = ImageDir + "/dist/entry.js"
-	NPMGlobal           = "/app/npm-global"
-	OpenClawDir         = NPMGlobal + "/lib/node_modules/openclaw"
-	OpenClawPackagePath = OpenClawDir + "/package.json"
-	OpenClawBuildInfo   = OpenClawDir + "/dist/build-info.json"
-	OpenClawBin         = NPMGlobal + "/bin/openclaw"
-	EntryJSPath         = OpenClawDir + "/dist/entry.js"
-	EntrypointCopyState = "/tmp/openclaw-entrypoint-copy-progress.json"
+	ImageDir               = "/opt/openclaw-image"
+	ImagePackagePath       = ImageDir + "/package.json"
+	ImageBuildInfoPath     = ImageDir + "/dist/build-info.json"
+	ImageEntryJSPath       = ImageDir + "/dist/entry.js"
+	ImageControlUIRoot     = ImageDir + "/dist/control-ui"
+	ImageControlUIIndex    = ImageControlUIRoot + "/index.html"
+	NPMGlobal              = "/app/npm-global"
+	OpenClawDir            = NPMGlobal + "/lib/node_modules/openclaw"
+	OpenClawPackagePath    = OpenClawDir + "/package.json"
+	OpenClawBuildInfo      = OpenClawDir + "/dist/build-info.json"
+	OpenClawControlUIRoot  = OpenClawDir + "/dist/control-ui"
+	OpenClawControlUIIndex = OpenClawControlUIRoot + "/index.html"
+	OpenClawBin            = NPMGlobal + "/bin/openclaw"
+	GatewayProcessName     = "openclaw-gateway"
+	EntryJSPath            = OpenClawDir + "/dist/entry.js"
+	EntrypointCopyState    = "/tmp/openclaw-entrypoint-copy-progress.json"
 )
 
 type Status string
@@ -243,6 +248,13 @@ func (m *Monitor) detectInstallMismatch() (bool, string, error) {
 	currentHash, currentErr := fileSHA256(EntryJSPath)
 	if imageErr == nil && currentErr == nil && imageHash != currentHash {
 		reason := fmt.Sprintf("detected install drift: same version %s but dist/entry.js hash differs", imageVersion)
+		return true, reason, nil
+	}
+
+	imageControlUiHash, imageControlUiErr := fileSHA256(ImageControlUIIndex)
+	currentControlUiHash, currentControlUiErr := fileSHA256(OpenClawControlUIIndex)
+	if imageControlUiErr == nil && currentControlUiErr == nil && imageControlUiHash != currentControlUiHash {
+		reason := fmt.Sprintf("detected install drift: same version %s but dist/control-ui differs", imageVersion)
 		return true, reason, nil
 	}
 
@@ -543,11 +555,249 @@ func shellSingleQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
+func fileExists(path string) bool {
+	stat, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return !stat.IsDir()
+}
+
+func summarizeCommandOutput(output []byte) string {
+	raw := strings.TrimSpace(string(output))
+	if raw == "" {
+		return ""
+	}
+	lines := strings.Split(raw, "\n")
+	lastLine := strings.TrimSpace(lines[len(lines)-1])
+	if len(lastLine) > 240 {
+		return lastLine[:239] + "..."
+	}
+	return lastLine
+}
+
+func copyDirContents(src, dst string) error {
+	if err := os.MkdirAll(dst, 0755); err != nil {
+		return fmt.Errorf("create destination dir %s: %w", dst, err)
+	}
+
+	srcContents := filepath.Clean(src) + string(os.PathSeparator) + "."
+	cmd := exec.Command("cp", "-a", srcContents, dst)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		detail := summarizeCommandOutput(output)
+		if detail == "" {
+			return fmt.Errorf("cp -a %s -> %s: %w", src, dst, err)
+		}
+		return fmt.Errorf("cp -a %s -> %s: %w (%s)", src, dst, err, detail)
+	}
+
+	return nil
+}
+
+func lookupProcessIDsByName(name string) ([]int, error) {
+	out, err := exec.Command("pgrep", "-x", name).Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	fields := strings.Fields(string(out))
+	pids := make([]int, 0, len(fields))
+	for _, field := range fields {
+		pid, convErr := strconv.Atoi(field)
+		if convErr != nil || pid <= 1 {
+			continue
+		}
+		pids = append(pids, pid)
+	}
+
+	return pids, nil
+}
+
+func (m *Monitor) isOpenClawGatewayRunningByProcessName() bool {
+	pids, err := lookupProcessIDsByName(GatewayProcessName)
+	if err != nil {
+		m.addLog(fmt.Sprintf("[tower] Failed to check %s process: %v", GatewayProcessName, err))
+		return false
+	}
+	return len(pids) > 0
+}
+
+func (m *Monitor) stopOpenClawByProcessName() error {
+	pids, err := lookupProcessIDsByName(GatewayProcessName)
+	if err != nil {
+		return fmt.Errorf("query %s processes: %w", GatewayProcessName, err)
+	}
+	if len(pids) == 0 {
+		return nil
+	}
+
+	m.addLog(fmt.Sprintf("[tower] Stopping %s processes: %v", GatewayProcessName, pids))
+	for _, pid := range pids {
+		_ = syscall.Kill(pid, syscall.SIGTERM)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(250 * time.Millisecond)
+		remaining, queryErr := lookupProcessIDsByName(GatewayProcessName)
+		if queryErr != nil {
+			return fmt.Errorf("re-check %s after SIGTERM: %w", GatewayProcessName, queryErr)
+		}
+		if len(remaining) == 0 {
+			m.addLog(fmt.Sprintf("[tower] %s stopped gracefully by name", GatewayProcessName))
+			return nil
+		}
+	}
+
+	remaining, err := lookupProcessIDsByName(GatewayProcessName)
+	if err != nil {
+		return fmt.Errorf("query %s after SIGTERM timeout: %w", GatewayProcessName, err)
+	}
+	if len(remaining) == 0 {
+		return nil
+	}
+
+	m.addLog(fmt.Sprintf("[tower] Force killing %s processes: %v", GatewayProcessName, remaining))
+	for _, pid := range remaining {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	finalPIDs, err := lookupProcessIDsByName(GatewayProcessName)
+	if err != nil {
+		return fmt.Errorf("query %s after SIGKILL: %w", GatewayProcessName, err)
+	}
+	if len(finalPIDs) > 0 {
+		return fmt.Errorf("%s still running after SIGKILL: %v", GatewayProcessName, finalPIDs)
+	}
+
+	return nil
+}
+
+func isLazycatRuntime() bool {
+	return os.Getenv("LAZYCAT_APP_DOMAIN") != "" || os.Getenv("NPM_CONFIG_PREFIX") == NPMGlobal
+}
+
+func (m *Monitor) isControlUiEnabledInConfig() bool {
+	raw, err := os.ReadFile(m.config.ConfigPath)
+	if err != nil {
+		return true
+	}
+
+	var cfg struct {
+		Gateway struct {
+			ControlUI struct {
+				Enabled *bool `json:"enabled"`
+			} `json:"controlUi"`
+		} `json:"gateway"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return true
+	}
+
+	if cfg.Gateway.ControlUI.Enabled == nil {
+		return true
+	}
+
+	return *cfg.Gateway.ControlUI.Enabled
+}
+
+func (m *Monitor) ensureLazycatControlUiAssets() error {
+	if !isLazycatRuntime() {
+		return nil
+	}
+	if !m.isControlUiEnabledInConfig() {
+		return nil
+	}
+
+	if !fileExists(ImageControlUIIndex) {
+		if fileExists(OpenClawControlUIIndex) {
+			m.addLog("[tower] Control UI assets only found in installed runtime; skipping image sync")
+			return nil
+		}
+		return fmt.Errorf("control UI assets missing in image: %s", ImageControlUIIndex)
+	}
+
+	needRestore := !fileExists(OpenClawControlUIIndex)
+	if !needRestore {
+		imageHash, imageErr := fileSHA256(ImageControlUIIndex)
+		currentHash, currentErr := fileSHA256(OpenClawControlUIIndex)
+		if imageErr != nil {
+			return fmt.Errorf("hash image Control UI index: %w", imageErr)
+		}
+		if currentErr != nil {
+			needRestore = true
+			m.addLog("[tower] Installed Control UI index unreadable; restoring from image")
+		} else if imageHash != currentHash {
+			needRestore = true
+			m.addLog("[tower] Control UI asset drift detected; restoring from image")
+		}
+	}
+
+	if !needRestore {
+		return nil
+	}
+
+	m.addLog("[tower] Restoring Control UI assets from image")
+	if err := os.RemoveAll(OpenClawControlUIRoot); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove stale Control UI assets: %w", err)
+	}
+	if err := copyDirContents(ImageControlUIRoot, OpenClawControlUIRoot); err != nil {
+		return fmt.Errorf("restore Control UI assets from image: %w", err)
+	}
+
+	if !fileExists(OpenClawControlUIIndex) {
+		return fmt.Errorf(
+			"Control UI restore finished but %s is still missing",
+			OpenClawControlUIIndex,
+		)
+	}
+
+	m.addLog("[tower] Control UI assets restored successfully")
+	return nil
+}
+
+func (m *Monitor) ensureLazycatControlUiOriginFallback(binPath string) error {
+	if !isLazycatRuntime() {
+		return nil
+	}
+
+	cmd := exec.Command(
+		binPath,
+		"config",
+		"set",
+		"gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback",
+		"true",
+	)
+	cmd.Env = os.Environ()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		detail := strings.TrimSpace(string(output))
+		if detail == "" {
+			return fmt.Errorf("set gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback=true: %w", err)
+		}
+		return fmt.Errorf(
+			"set gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback=true: %w (%s)",
+			err,
+			detail,
+		)
+	}
+
+	m.addLog("[tower] Applied lazycat Control UI origin fallback compatibility setting")
+	return nil
+}
+
 func (m *Monitor) SyncInstallToLatest() error {
 	m.addLog("[tower] Sync requested: syncing installed OpenClaw to latest image version")
 
+	wasRunning := m.isOpenClawGatewayRunningByProcessName()
+
 	m.mu.Lock()
-	shouldRestart := m.cmd != nil && m.cmd.Process != nil
+	wasUpdateRequired := m.updateRequired
 	m.status = StatusStarting
 	m.lastError = ""
 	m.awaitingReturn = false
@@ -556,7 +806,15 @@ func (m *Monitor) SyncInstallToLatest() error {
 	m.startingDeadline = time.Time{}
 	m.mu.Unlock()
 
-	if shouldRestart {
+	shouldStartAfterSync := wasRunning || wasUpdateRequired
+
+	if wasRunning {
+		m.addLog("[tower] Detected running openclaw-gateway process; sync will stop and restart service")
+	} else if shouldStartAfterSync {
+		m.addLog("[tower] Sync requested during update-required flow; service will auto-start after sync")
+	}
+
+	if wasRunning {
 		m.addLog("[tower] Stopping OpenClaw before sync")
 		if err := m.StopOpenClaw(); err != nil {
 			m.mu.Lock()
@@ -582,10 +840,10 @@ func (m *Monitor) SyncInstallToLatest() error {
 
 	m.evaluateInstallSyncRequirement()
 
-	if shouldRestart {
-		m.addLog("[tower] Restarting OpenClaw after sync")
+	if shouldStartAfterSync {
+		m.addLog("[tower] Starting OpenClaw after sync")
 		if err := m.startOpenClaw(); err != nil {
-			m.addLog(fmt.Sprintf("[tower] Restart after sync failed: %v", err))
+			m.addLog(fmt.Sprintf("[tower] Start after sync failed: %v", err))
 			return err
 		}
 		return nil
@@ -687,22 +945,23 @@ func (m *Monitor) GetStatusInfo() map[string]interface{} {
 	defer m.mu.RUnlock()
 
 	info := map[string]interface{}{
-		"status":            string(m.status),
-		"userConfirmed":     m.userConfirmed,
-		"awaitingReturn":    m.awaitingReturn,
-		"updateRequired":    m.updateRequired,
-		"updateReason":      m.updateReason,
-		"copyInProgress":    m.copyInProgress,
-		"copySource":        m.copySource,
-		"copyStage":         m.copyStage,
-		"copyTotalEntries":  m.copyTotalEntries,
-		"copyCopiedEntries": m.copyCopiedEntries,
-		"copyTotalBytes":    m.copyTotalBytes,
-		"copyCopiedBytes":   m.copyCopiedBytes,
-		"copyPercent":       m.copyPercent,
-		"crashCount":        m.crashCount,
-		"lastError":         m.lastError,
-		"lastRestartReason": m.lastRestartReason,
+		"status":                     string(m.status),
+		"userConfirmed":              m.userConfirmed,
+		"awaitingReturn":             m.awaitingReturn,
+		"requiresReturnConfirmation": m.requiresReturnConfirmationLocked(),
+		"updateRequired":             m.updateRequired,
+		"updateReason":               m.updateReason,
+		"copyInProgress":             m.copyInProgress,
+		"copySource":                 m.copySource,
+		"copyStage":                  m.copyStage,
+		"copyTotalEntries":           m.copyTotalEntries,
+		"copyCopiedEntries":          m.copyCopiedEntries,
+		"copyTotalBytes":             m.copyTotalBytes,
+		"copyCopiedBytes":            m.copyCopiedBytes,
+		"copyPercent":                m.copyPercent,
+		"crashCount":                 m.crashCount,
+		"lastError":                  m.lastError,
+		"lastRestartReason":          m.lastRestartReason,
 	}
 
 	if !m.copyUpdatedAt.IsZero() {
@@ -750,28 +1009,20 @@ func (m *Monitor) addLog(line string) {
 	}
 }
 
+func (m *Monitor) requiresReturnConfirmationLocked() bool {
+	return m.awaitingReturn || (m.status == StatusRunning && m.crashCount > 0 && !m.userConfirmed)
+}
+
 func (m *Monitor) IsProxyMode() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	// Proxy when running, unless crashed and not yet confirmed
-	// After crash, user must confirm to re-enter proxy mode
-	if m.status == StatusRunning {
-		// OpenClaw requested an in-process restart (for example after AI config operations).
-		// Keep Tower UI visible until operator confirms return.
-		if m.awaitingReturn {
-			return false
-		}
-		if m.updateRequired && !m.userConfirmed {
-			return false
-		}
-		// If never crashed, auto-proxy
-		// If crashed before, need user confirmation
-		if m.crashCount == 0 {
-			return true
-		}
-		return m.userConfirmed
+	if m.status != StatusRunning {
+		return false
 	}
-	return false
+	if m.updateRequired && !m.userConfirmed {
+		return false
+	}
+	return !m.requiresReturnConfirmationLocked()
 }
 
 func (m *Monitor) SetUserConfirmed(confirmed bool) {
@@ -836,31 +1087,54 @@ func (m *Monitor) PromoteRunningIfReachable() bool {
 }
 
 func (m *Monitor) StartOpenClaw() error {
+	if m.isOpenClawGatewayRunningByProcessName() {
+		return fmt.Errorf("OpenClaw is already running (%s detected)", GatewayProcessName)
+	}
+
 	m.mu.Lock()
-	if m.status == StatusRunning || m.status == StatusStarting {
-		m.mu.Unlock()
-		return fmt.Errorf("OpenClaw is already running or starting")
+	staleActiveState := m.status == StatusRunning || m.status == StatusStarting
+	if staleActiveState {
+		m.status = StatusStopped
+		m.awaitingReturn = false
+		m.lastRestartReason = ""
+		m.startingDeadline = time.Time{}
 	}
 	m.mu.Unlock()
+	if staleActiveState {
+		m.addLog("[tower] Cleared stale running/starting state before manual start")
+	}
 
 	return m.startOpenClaw()
 }
 
 func (m *Monitor) StopOpenClaw() error {
 	m.mu.Lock()
+	cmd := m.cmd
+	cmdDone := m.cmdDone
+	m.mu.Unlock()
 
-	if m.cmd == nil || m.cmd.Process == nil {
+	if cmd == nil || cmd.Process == nil {
+		if m.isOpenClawGatewayRunningByProcessName() {
+			if err := m.stopOpenClawByProcessName(); err != nil {
+				m.mu.Lock()
+				m.status = StatusCrashed
+				m.lastError = fmt.Sprintf("Failed to stop %s: %v", GatewayProcessName, err)
+				m.startingDeadline = time.Time{}
+				m.crashCount++
+				m.mu.Unlock()
+				return err
+			}
+		}
+
+		m.mu.Lock()
 		m.status = StatusStopped
 		m.awaitingReturn = false
 		m.lastRestartReason = ""
 		m.startingDeadline = time.Time{}
+		m.lastError = ""
 		m.mu.Unlock()
 		return nil
 	}
-
-	cmd := m.cmd
-	cmdDone := m.cmdDone
-	m.mu.Unlock()
 
 	m.addLog("[tower] Stopping OpenClaw...")
 
@@ -955,6 +1229,26 @@ func (m *Monitor) startOpenClaw() error {
 		m.startingDeadline = time.Time{}
 		m.mu.Unlock()
 		m.addLog(fmt.Sprintf("[tower] Failed to prepare OpenClaw executable: %v", err))
+		return err
+	}
+
+	if err := m.ensureLazycatControlUiOriginFallback(binPath); err != nil {
+		m.mu.Lock()
+		m.status = StatusCrashed
+		m.lastError = err.Error()
+		m.startingDeadline = time.Time{}
+		m.mu.Unlock()
+		m.addLog(fmt.Sprintf("[tower] Failed to apply lazycat Control UI compatibility setting: %v", err))
+		return err
+	}
+
+	if err := m.ensureLazycatControlUiAssets(); err != nil {
+		m.mu.Lock()
+		m.status = StatusCrashed
+		m.lastError = err.Error()
+		m.startingDeadline = time.Time{}
+		m.mu.Unlock()
+		m.addLog(fmt.Sprintf("[tower] Failed to repair Control UI assets: %v", err))
 		return err
 	}
 

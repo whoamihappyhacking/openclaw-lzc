@@ -82,8 +82,14 @@ WORKDIR /opt/openclaw-image
 
 # 复制 package.json 等配置文件
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc openclaw.mjs ./
+COPY tsconfig.json ./tsconfig.json
+COPY ui/tsconfig.json ./ui/tsconfig.json
 COPY openclaw-tower/internal/web/default-config.json ./default-config.json
+COPY scripts/ui.js ./scripts/ui.js
 COPY ui/package.json ./ui/package.json
+COPY ui/index.html ui/vite.config.ts ./ui/
+COPY ui/src ./ui/src
+COPY ui/public ./ui/public
 COPY patches ./patches
 
 # 复制本地 node_modules（已在宿主机安装好）
@@ -98,6 +104,9 @@ COPY extensions ./extensions
 COPY skills ./skills
 COPY assets ./assets
 COPY git-hooks ./git-hooks
+
+# 重新构建 Control UI 静态资源，避免复制到镜像的旧产物导致前端运行时异常
+RUN pnpm ui:build && test -f /opt/openclaw-image/dist/control-ui/index.html
 
 # 设置 npm 全局安装目录到持久化卷
 ENV NPM_CONFIG_PREFIX=/app/npm-global

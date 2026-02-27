@@ -115,6 +115,8 @@ export async function resolveGatewayRuntimeConfig(params: {
     process.env.OPENCLAW_SKIP_CANVAS_HOST !== "1" && params.cfg.canvasHost?.enabled !== false;
 
   const trustedProxies = params.cfg.gateway?.trustedProxies ?? [];
+  const isLazycatRuntime =
+    Boolean(process.env.LAZYCAT_APP_DOMAIN) || process.env.NPM_CONFIG_PREFIX === "/app/npm-global";
   const controlUiAllowedOrigins = (params.cfg.gateway?.controlUi?.allowedOrigins ?? [])
     .map((value) => value.trim())
     .filter(Boolean);
@@ -138,6 +140,7 @@ export async function resolveGatewayRuntimeConfig(params: {
   if (
     controlUiEnabled &&
     !isLoopbackHost(bindHost) &&
+    !isLazycatRuntime &&
     controlUiAllowedOrigins.length === 0 &&
     !dangerouslyAllowHostHeaderOriginFallback
   ) {
