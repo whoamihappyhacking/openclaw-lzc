@@ -65,6 +65,12 @@ import {
   updateSkillEdit,
   updateSkillEnabled,
 } from "./controllers/skills.ts";
+import {
+  createTerminalSession,
+  closeTerminalSession,
+  mountTerminal,
+  toggleTerminalMouseMode,
+} from "./controllers/terminal.ts";
 import { buildExternalLinkRel, EXTERNAL_LINK_TARGET } from "./external-link.ts";
 import { icons } from "./icons.ts";
 import { normalizeBasePath, TAB_GROUPS, subtitleForTab, titleForTab } from "./navigation.ts";
@@ -89,14 +95,7 @@ import { renderNodes } from "./views/nodes.ts";
 import { renderOverview } from "./views/overview.ts";
 import { renderSessions } from "./views/sessions.ts";
 import { renderSkills } from "./views/skills.ts";
-import { renderUsage } from "./views/usage.ts";
 import { renderTerminal } from "./views/terminal.ts";
-import {
-  createTerminalSession,
-  closeTerminalSession,
-  mountTerminal,
-  toggleTerminalMouseMode,
-} from "./controllers/terminal.ts";
 
 const AVATAR_DATA_RE = /^data:/i;
 const AVATAR_HTTP_RE = /^https?:\/\//i;
@@ -136,6 +135,24 @@ function uniquePreserveOrder(values: string[]): string[] {
     output.push(normalized);
   }
   return output;
+}
+
+function resolveTerminalAuthToken(state: AppViewState): string {
+  const configuredToken = state.settings.token.trim();
+  if (configuredToken) {
+    return configuredToken;
+  }
+
+  const password = typeof state.password === "string" ? state.password.trim() : "";
+  if (password) {
+    return password;
+  }
+
+  // Device token is not a universal fallback for terminal WS auth.
+  // Prefer shared token/password first; then fallback to paired-device token.
+  const deviceToken =
+    typeof state.hello?.auth?.deviceToken === "string" ? state.hello.auth.deviceToken.trim() : "";
+  return deviceToken;
 }
 
 function resolveAssistantAvatarUrl(state: AppViewState): string | undefined {
@@ -869,7 +886,8 @@ export function renderApp(state: AppViewState) {
                 onCreateSession: () => createTerminalSession(state),
                 onCloseSession: (id) => closeTerminalSession(state, id),
                 onSwitchSession: (id) => (state.terminalActiveId = id),
-                onMount: (id, container) => void mountTerminal(id, container, state.settings.token),
+                onMount: (id, container) =>
+                  void mountTerminal(id, container, resolveTerminalAuthToken(state)),
                 onToggleMouseMode: () => toggleTerminalMouseMode(state),
               })
             : nothing

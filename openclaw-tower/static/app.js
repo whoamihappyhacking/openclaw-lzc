@@ -3,24 +3,21 @@
 let terminal = null;
 let fitAddon = null;
 let ws = null;
-let statusPollInterval = null;
-let logsPollInterval = null;
 let syncInFlight = false;
 let serviceActionInFlight = false;
 let dangerConfirmResolve = null;
-let logs = [];
-const MAX_LOGS = 500;
 const DANGER_CONFIRM_TEXT = "yes";
 
 // Initialize on page load
 document.addEventListener("DOMContentLoaded", function () {
+  setLogsPlaceholderState(true);
   initTerminal();
   initDangerConfirmModal();
   pollStatus();
   pollLogs();
   // Poll status every 0.5 second for more responsive progress/state update
-  statusPollInterval = setInterval(pollStatus, 500);
-  logsPollInterval = setInterval(pollLogs, 2000);
+  setInterval(pollStatus, 500);
+  setInterval(pollLogs, 2000);
 });
 
 // Initialize xterm.js terminal
@@ -28,7 +25,7 @@ function initTerminal() {
   terminal = new Terminal({
     cursorBlink: true,
     fontFamily:
-      "'JetBrains Mono', 'Fira Code', 'SF Mono', 'Menlo', 'Consolas', 'Noto Sans Mono CJK SC', 'Microsoft YaHei', monospace",
+      "'JetBrains Mono', 'Cascadia Mono', 'Fira Code', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'Liberation Mono', 'Noto Sans Mono CJK SC', 'Source Han Mono SC', monospace",
     fontSize: 14,
     lineHeight: 1.4,
     scrollback: 5000,
@@ -89,14 +86,14 @@ function connectTerminalWS() {
 
   ws = new WebSocket(wsUrl);
 
-  ws.onopen = function () {
+  ws.addEventListener("open", function () {
     terminal.write("\x1b[32m终端已连接\x1b[0m\r\n");
     // Send initial size
     const dims = { type: "resize", cols: terminal.cols, rows: terminal.rows };
     ws.send(JSON.stringify(dims));
-  };
+  });
 
-  ws.onmessage = function (event) {
+  ws.addEventListener("message", function (event) {
     try {
       const msg = JSON.parse(event.data);
       if (msg.type === "data") {
@@ -104,20 +101,20 @@ function connectTerminalWS() {
       } else if (msg.type === "error") {
         terminal.write("\x1b[31m错误: " + msg.data + "\x1b[0m\r\n");
       }
-    } catch (e) {
+    } catch {
       // Raw data
       terminal.write(event.data);
     }
-  };
+  });
 
-  ws.onerror = function () {
+  ws.addEventListener("error", function () {
     terminal.write("\x1b[31m连接错误\x1b[0m\r\n");
-  };
+  });
 
-  ws.onclose = function () {
+  ws.addEventListener("close", function () {
     terminal.write("\x1b[33m已断开，3秒后重连...\x1b[0m\r\n");
     setTimeout(connectTerminalWS, 3000);
-  };
+  });
 
   // Send input to server
   terminal.onData(function (data) {
@@ -159,7 +156,7 @@ function pollLogs() {
         updateLogsUI(data.logs);
       }
     })
-    .catch(function (err) {
+    .catch(function () {
       // Logs endpoint might not exist yet, ignore
     });
 }
@@ -204,11 +201,20 @@ function updateLogsUI(newLogs) {
   });
 
   logsContent.innerHTML = html;
+  setLogsPlaceholderState(false);
 
   // Auto-scroll if was at bottom
   if (isAtBottom) {
     logsContainer.scrollTop = logsContainer.scrollHeight;
   }
+}
+
+function setLogsPlaceholderState(isPlaceholder) {
+  const logsContent = document.getElementById("logsContent");
+  if (!logsContent) {
+    return;
+  }
+  logsContent.classList.toggle("logs-placeholder", isPlaceholder);
 }
 
 function escapeHtml(text) {
@@ -221,6 +227,7 @@ function escapeHtml(text) {
 function clearLogs() {
   const logsContent = document.getElementById("logsContent");
   logsContent.innerHTML = "日志已清空";
+  setLogsPlaceholderState(true);
   fetch("/tower/logs/clear", { method: "POST" }).catch(function () {});
 }
 
@@ -239,7 +246,7 @@ function copyLogs() {
   }
 
   const text = logsContent.textContent || "";
-  if (!text.trim()) {
+  if (!text.trim() || logsContent.classList.contains("logs-placeholder")) {
     showToast("暂无可复制日志", "info");
     return;
   }
@@ -272,7 +279,7 @@ function fallbackCopyText(text) {
   let copied = false;
   try {
     copied = document.execCommand("copy");
-  } catch (_err) {
+  } catch {
     copied = false;
   }
 
@@ -302,14 +309,9 @@ function updateStatusUI(data) {
   const copyProgressFill = document.getElementById("copyProgressFill");
   const copyProgressMeta = document.getElementById("copyProgressMeta");
 
-  // Auto-reload when running and no crashes (first time startup)
-  // This will cause Tower to proxy to OpenClaw
-  if (
-    data.status === "running" &&
-    data.crashCount === 0 &&
-    !data.awaitingReturn &&
-    !data.updateRequired
-  ) {
+  // Auto-reload when running and no manual confirmation/sync is pending.
+  // This causes Tower to proxy back to OpenClaw automatically.
+  if (data.status === "running" && !data.updateRequired && !data.requiresReturnConfirmation) {
     showToast("OpenClaw 已就绪，正在进入...", "success");
     setTimeout(function () {
       window.location.reload();
@@ -349,7 +351,11 @@ function updateStatusUI(data) {
   if (data.uptime) {
     details.push("运行时间: " + formatUptime(data.uptime));
   }
-  statusDetails.textContent = details.join(" | ");
+  const hasDetails = details.length > 0;
+  if (statusDetails) {
+    statusDetails.classList.toggle("status-details-empty", !hasDetails);
+    statusDetails.textContent = hasDetails ? details.join("\n") : "暂无崩溃/运行详情";
+  }
 
   updateCopyProgressUI({
     copyProgress,
@@ -363,14 +369,13 @@ function updateStatusUI(data) {
   // Show action area when:
   // - update is required (always show sync button), or
   // - operator confirmation is needed after restart/crash.
-  const needsManualReturn =
-    data.awaitingReturn ||
-    (data.status === "running" && data.crashCount > 0 && !data.userConfirmed);
+  const requiresReturnConfirmation = !!data.requiresReturnConfirmation;
   const showUpdateAction = !!data.updateRequired;
-  const allowReturnWhileUpdate = showUpdateAction && data.status === "running";
-  const showConfirmReadyAction = needsManualReturn || allowReturnWhileUpdate;
+  const showConfirmReadyAction =
+    requiresReturnConfirmation || (showUpdateAction && data.status === "running");
+  const showConfirmSection = showUpdateAction || requiresReturnConfirmation;
 
-  if (needsManualReturn || showUpdateAction) {
+  if (showConfirmSection) {
     confirmSection.style.display = "block";
   } else {
     confirmSection.style.display = "none";
@@ -844,7 +849,7 @@ function setLoading(btn, loading) {
     btn.disabled = true;
   } else {
     btn.classList.remove("loading");
-    // Keep legacy button state behavior; status polling controls start/stop buttons.
+    // Status polling controls start/stop buttons.
     if (btn.id === "btnSyncLatest") {
       btn.disabled = false;
     }
