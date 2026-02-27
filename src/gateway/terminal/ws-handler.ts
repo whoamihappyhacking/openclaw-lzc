@@ -1,12 +1,13 @@
+import { timingSafeEqual } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
-import { timingSafeEqual } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
-import type { ResolvedGatewayAuth } from "../auth.js";
-import type { GatewayWsClient } from "../server/ws-types.js";
 import { rawDataToString } from "../../infra/ws.js";
-import { isLocalDirectRequest } from "../auth.js";
+import type { ResolvedGatewayAuth } from "../auth.js";
+import { authorizeWsControlUiGatewayConnect, isLocalDirectRequest } from "../auth.js";
 import { resolveClientIp } from "../net.js";
+import { checkBrowserOrigin } from "../origin-check.js";
+import type { GatewayWsClient } from "../server/ws-types.js";
 import {
   createTerminal,
   writeToTerminal,
@@ -34,16 +35,6 @@ function safeEqual(a: string, b: string): boolean {
   }
 }
 
-function verifyAuth(auth: ResolvedGatewayAuth, token: string): boolean {
-  if (auth.mode === "token" && auth.token) {
-    return safeEqual(token, auth.token);
-  }
-  if (auth.mode === "password" && auth.password) {
-    return safeEqual(token, auth.password);
-  }
-  return false;
-}
-
 function getHeader(req: IncomingMessage, name: string): string | undefined {
   const value = req.headers[name.toLowerCase()];
   if (Array.isArray(value)) {
@@ -61,13 +52,70 @@ function hasAuthorizedWsClientForIp(clients: Set<GatewayWsClient>, clientIp: str
   return false;
 }
 
+function extractClientAuthToken(client: GatewayWsClient): string | undefined {
+  const auth = client.connect?.auth;
+  if (!auth || typeof auth !== "object") {
+    return undefined;
+  }
+
+  const token =
+    typeof auth.token === "string" && auth.token.trim().length > 0
+      ? auth.token.trim()
+      : typeof auth.deviceToken === "string" && auth.deviceToken.trim().length > 0
+        ? auth.deviceToken.trim()
+        : undefined;
+  return token;
+}
+
+function hasAuthorizedWsClientForToken(params: {
+  req: IncomingMessage;
+  token: string;
+  trustedProxies: string[];
+  allowRealIpFallback: boolean;
+  clients: Set<GatewayWsClient>;
+}): boolean {
+  const { req, token, trustedProxies, allowRealIpFallback, clients } = params;
+  if (isLocalDirectRequest(req, trustedProxies, allowRealIpFallback)) {
+    for (const client of clients) {
+      const clientToken = extractClientAuthToken(client);
+      if (clientToken && safeEqual(clientToken, token)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  const clientIp = resolveClientIp({
+    remoteAddr: req.socket?.remoteAddress ?? "",
+    forwardedFor: getHeader(req, "x-forwarded-for"),
+    realIp: getHeader(req, "x-real-ip"),
+    trustedProxies,
+    allowRealIpFallback,
+  });
+  if (!clientIp) {
+    return false;
+  }
+
+  for (const client of clients) {
+    if (!client.clientIp || client.clientIp !== clientIp) {
+      continue;
+    }
+    const clientToken = extractClientAuthToken(client);
+    if (clientToken && safeEqual(clientToken, token)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function isAuthorizedByExistingGatewayClient(params: {
   req: IncomingMessage;
   trustedProxies: string[];
+  allowRealIpFallback: boolean;
   clients: Set<GatewayWsClient>;
 }): boolean {
-  const { req, trustedProxies, clients } = params;
-  if (isLocalDirectRequest(req, trustedProxies)) {
+  const { req, trustedProxies, allowRealIpFallback, clients } = params;
+  if (isLocalDirectRequest(req, trustedProxies, allowRealIpFallback)) {
     return true;
   }
 
@@ -76,6 +124,7 @@ function isAuthorizedByExistingGatewayClient(params: {
     forwardedFor: getHeader(req, "x-forwarded-for"),
     realIp: getHeader(req, "x-real-ip"),
     trustedProxies,
+    allowRealIpFallback,
   });
   if (!clientIp) {
     return false;
@@ -87,7 +136,7 @@ export function createTerminalWebSocketServer(): WebSocketServer {
   return new WebSocketServer({ noServer: true });
 }
 
-export function handleTerminalUpgrade(
+export async function handleTerminalUpgrade(
   wss: WebSocketServer,
   req: IncomingMessage,
   socket: Duplex,
@@ -96,9 +145,15 @@ export function handleTerminalUpgrade(
     resolvedAuth: ResolvedGatewayAuth;
     defaultCwd?: string;
     trustedProxies?: string[];
+    allowRealIpFallback?: boolean;
     clients?: Set<GatewayWsClient>;
+    controlUiConfig?: {
+      allowedOrigins?: string[];
+      dangerouslyAllowHostHeaderOriginFallback?: boolean;
+      dangerouslyDisableDeviceAuth?: boolean;
+    };
   },
-): boolean {
+): Promise<boolean> {
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
 
   if (url.pathname !== "/ws/terminal") {
@@ -114,20 +169,55 @@ export function handleTerminalUpgrade(
     return true;
   }
 
-  const tokenOk =
-    typeof token === "string" && token.length > 0 && verifyAuth(opts.resolvedAuth, token);
+  const tokenValue = typeof token === "string" ? token.trim() : "";
+  const trustedProxies = opts.trustedProxies ?? [];
+  const allowRealIpFallback = opts.allowRealIpFallback === true;
+  const clients = opts.clients;
+  const gatewayAuthResult = await authorizeWsControlUiGatewayConnect({
+    auth: opts.resolvedAuth,
+    connectAuth:
+      tokenValue.length > 0
+        ? {
+            token: tokenValue,
+            password: tokenValue,
+          }
+        : undefined,
+    req,
+    trustedProxies,
+    allowRealIpFallback,
+  });
+  const tokenOkByExistingClient =
+    tokenValue.length > 0 && clients
+      ? hasAuthorizedWsClientForToken({
+          req,
+          token: tokenValue,
+          trustedProxies,
+          allowRealIpFallback,
+          clients,
+        })
+      : false;
+  const tokenOk = gatewayAuthResult.ok || tokenOkByExistingClient;
+
   if (!tokenOk) {
-    const trustedProxies = opts.trustedProxies ?? [];
-    const clients = opts.clients;
     const allowWithoutToken =
       clients &&
       isAuthorizedByExistingGatewayClient({
         req,
         trustedProxies,
+        allowRealIpFallback,
         clients,
       });
+    const allowControlUiBypass =
+      opts.controlUiConfig?.dangerouslyDisableDeviceAuth === true &&
+      checkBrowserOrigin({
+        requestHost: getHeader(req, "host"),
+        origin: getHeader(req, "origin"),
+        allowedOrigins: opts.controlUiConfig?.allowedOrigins,
+        allowHostHeaderOriginFallback:
+          opts.controlUiConfig?.dangerouslyAllowHostHeaderOriginFallback === true,
+      }).ok;
 
-    if (!allowWithoutToken) {
+    if (!allowWithoutToken && !allowControlUiBypass) {
       socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
       socket.destroy();
       return true;

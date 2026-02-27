@@ -548,8 +548,7 @@ export function attachGatewayWsMessageHandler(params: {
         const effectiveControlUiConfig = isBrowserUi
           ? {
               ...controlUiConfig,
-              dangerouslyDisableDeviceAuth:
-                controlUiConfig?.dangerouslyDisableDeviceAuth ?? true,
+              dangerouslyDisableDeviceAuth: controlUiConfig?.dangerouslyDisableDeviceAuth ?? true,
             }
           : controlUiConfig;
         const controlUiAuthPolicy = resolveControlUiAuthPolicy({
@@ -982,6 +981,16 @@ export function attachGatewayWsMessageHandler(params: {
         const deviceToken = device
           ? await ensureDeviceToken({ deviceId: device.id, role, scopes })
           : null;
+        if (deviceToken?.token) {
+          const existingAuth = connectParams.auth ?? {};
+          connectParams.auth = {
+            ...existingAuth,
+            token:
+              typeof existingAuth.token === "string" && existingAuth.token.trim().length > 0
+                ? existingAuth.token
+                : deviceToken.token,
+          };
+        }
 
         if (role === "node") {
           const cfg = loadConfig();

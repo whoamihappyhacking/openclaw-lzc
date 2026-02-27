@@ -24,6 +24,16 @@ export default defineConfig(() => {
   return {
     base,
     publicDir: path.resolve(here, "public"),
+    esbuild: {
+      // Lit decorators rely on legacy TypeScript decorator transform.
+      // Force this in Vite so UI builds remain stable even without a local tsconfig lookup.
+      tsconfigRaw: {
+        compilerOptions: {
+          experimentalDecorators: true,
+          useDefineForClassFields: false,
+        },
+      },
+    },
     optimizeDeps: {
       include: ["lit/directives/repeat.js"],
     },
