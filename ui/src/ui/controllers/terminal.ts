@@ -1,8 +1,8 @@
-import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
-import type { TerminalSession } from "../ui-types.ts";
-import type { GatewayBrowserClient } from "../gateway.ts";
+import type { Terminal } from "@xterm/xterm";
 import type { OpenClawApp } from "../app.ts";
+import type { GatewayBrowserClient } from "../gateway.ts";
+import type { TerminalSession } from "../ui-types.ts";
 import { cleanupTerminalMount } from "../views/terminal.ts";
 
 export type TerminalState = {
@@ -48,7 +48,9 @@ export async function restoreTerminalSessions(
   try {
     const result = await client.request("terminal.list", {});
     const sessions = (result as { sessions?: string[] })?.sessions ?? [];
-    if (sessions.length === 0) return;
+    if (sessions.length === 0) {
+      return;
+    }
 
     // Create session entries for each persistent terminal
     const restored: TerminalSession[] = sessions.map((id, index) => ({
@@ -96,7 +98,7 @@ export function switchTerminalSession(state: TerminalState, id: string): void {
 export function initTerminalInstance(
   id: string,
   container: HTMLElement,
-  token: string,
+  _token: string,
 ): TerminalInstance | null {
   if (instances.has(id)) {
     const existing = instances.get(id)!;
@@ -114,7 +116,7 @@ export function initTerminalInstance(
 export async function mountTerminal(
   id: string,
   container: HTMLElement,
-  token: string,
+  token: string | null | undefined,
 ): Promise<void> {
   if (instances.has(id)) {
     const existing = instances.get(id)!;
@@ -135,7 +137,8 @@ export async function mountTerminal(
 
   const terminal = new Terminal({
     cursorBlink: true,
-    fontFamily: "'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+    fontFamily:
+      "'JetBrains Mono', 'Cascadia Mono', 'Fira Code', 'SFMono-Regular', Menlo, Monaco, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK SC', 'Source Han Mono SC', monospace",
     fontSize: 14,
     fontWeight: "400",
     fontWeightBold: "600",
@@ -182,18 +185,25 @@ export async function mountTerminal(
   };
   instances.set(id, instance);
 
-  const wsUrl = `${getWsUrl()}?token=${encodeURIComponent(token)}&id=${encodeURIComponent(id)}`;
+  const tokenValue = typeof token === "string" ? token.trim() : "";
+  const params = new URLSearchParams({ id });
+  if (tokenValue) {
+    params.set("token", tokenValue);
+  }
+  const wsUrl = `${getWsUrl()}?${params.toString()}`;
   const ws = new WebSocket(wsUrl);
   instance.ws = ws;
 
-  ws.onopen = () => {
+  ws.addEventListener("open", () => {
     terminal.write("\x1b[32mConnected to terminal.\x1b[0m\r\n");
     const { cols, rows } = terminal;
     ws.send(JSON.stringify({ type: "resize", cols, rows }));
-  };
+  });
 
-  ws.onmessage = (event) => {
-    if (instance.disposed) return;
+  ws.addEventListener("message", (event) => {
+    if (instance.disposed) {
+      return;
+    }
     try {
       const msg = JSON.parse(event.data as string) as { type: string; data?: string };
       if (msg.type === "data" && msg.data) {
@@ -205,17 +215,17 @@ export async function mountTerminal(
       // Treat as raw data
       terminal.write(event.data as string);
     }
-  };
+  });
 
-  ws.onerror = () => {
+  ws.addEventListener("error", () => {
     terminal.write("\r\n\x1b[31mConnection error.\x1b[0m\r\n");
-  };
+  });
 
-  ws.onclose = () => {
+  ws.addEventListener("close", () => {
     if (!instance.disposed) {
       terminal.write("\r\n\x1b[33mDisconnected.\x1b[0m\r\n");
     }
-  };
+  });
 
   terminal.onData((data) => {
     if (ws.readyState === WebSocket.OPEN) {
@@ -259,13 +269,16 @@ export async function mountTerminal(
     }
     if (e.ctrlKey && e.shiftKey && e.key === "V") {
       e.preventDefault();
-      navigator.clipboard.readText().then((text) => {
-        if (text && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "input", data: text }));
-        }
-      }).catch(() => {
-        // Clipboard read failed
-      });
+      navigator.clipboard
+        .readText()
+        .then((text) => {
+          if (text && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "input", data: text }));
+          }
+        })
+        .catch(() => {
+          // Clipboard read failed
+        });
     }
   });
 

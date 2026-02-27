@@ -1,6 +1,7 @@
-import type { WebSocket } from "ws";
-import nodePty from "@lydell/node-pty";
 import { execSync } from "node:child_process";
+import fs from "node:fs";
+import nodePty from "@lydell/node-pty";
+import type { WebSocket } from "ws";
 
 const MAX_TERMINALS = 10;
 const TMUX_SESSION_PREFIX = "clawdbot-term-";
@@ -40,7 +41,9 @@ function tmuxSessionExists(sessionName: string): boolean {
 
 // List existing tmux sessions with our prefix
 export function listTmuxSessions(): string[] {
-  if (!isTmuxAvailable()) return [];
+  if (!isTmuxAvailable()) {
+    return [];
+  }
   try {
     const output = execSync("tmux list-sessions -F '#{session_name}' 2>/dev/null", {
       encoding: "utf-8",
@@ -75,7 +78,8 @@ export function createTerminal(
     return { ok: false, error: `Terminal ${id} already exists` };
   }
 
-  const cwd = opts.cwd || process.env.HOME || "/app";
+  const preferredCwd = opts.cwd || process.env.HOME || "/app";
+  const cwd = fs.existsSync(preferredCwd) ? preferredCwd : process.cwd();
   const sessionName = `${TMUX_SESSION_PREFIX}${id}`;
 
   let term: ReturnType<typeof nodePty.spawn>;
@@ -143,21 +147,27 @@ export function createTerminal(
 
 export function writeToTerminal(id: string, data: string): boolean {
   const instance = terminals.get(id);
-  if (!instance) return false;
+  if (!instance) {
+    return false;
+  }
   instance.pty.write(data);
   return true;
 }
 
 export function resizeTerminal(id: string, cols: number, rows: number): boolean {
   const instance = terminals.get(id);
-  if (!instance) return false;
+  if (!instance) {
+    return false;
+  }
   instance.pty.resize(cols, rows);
   return true;
 }
 
 export function closeTerminal(id: string): boolean {
   const instance = terminals.get(id);
-  if (!instance) return false;
+  if (!instance) {
+    return false;
+  }
 
   instance.pty.kill();
   terminals.delete(id);
