@@ -181,6 +181,9 @@ export function renderApp(state: AppViewState) {
     state.updateAvailable.latestVersion !== state.updateAvailable.currentVersion
       ? state.updateAvailable
       : null;
+  // Intentionally disable the global update banner in the dashboard/chat shell.
+  // Keep update detection active for version status + manual update actions in Config.
+  const showGlobalUpdateBanner = false;
   const versionStatusClass = availableUpdate ? "warn" : "ok";
   const presenceCount = state.presenceEntries.length;
   const sessionsCount = state.sessionsResult?.count ?? null;
@@ -345,7 +348,7 @@ export function renderApp(state: AppViewState) {
       </aside>
       <main class="content ${isChat ? "content--chat" : ""}">
         ${
-          availableUpdate
+          showGlobalUpdateBanner && availableUpdate
             ? html`<div class="update-banner callout danger" role="alert">
               <strong>Update available:</strong> v${availableUpdate.latestVersion}
               (running v${availableUpdate.currentVersion}).
