@@ -105,6 +105,10 @@ COPY skills ./skills
 COPY assets ./assets
 COPY git-hooks ./git-hooks
 
+# UI 构建依赖 apps/shared 中的 tool-display.json（上游 macOS/iOS 共享资源）
+COPY apps/shared/OpenClawKit/Sources/OpenClawKit/Resources/tool-display.json \
+     ./apps/shared/OpenClawKit/Sources/OpenClawKit/Resources/tool-display.json
+
 # 重新构建 Control UI 静态资源，避免复制到镜像的旧产物导致前端运行时异常
 RUN pnpm ui:build && test -f /opt/openclaw-image/dist/control-ui/index.html
 
