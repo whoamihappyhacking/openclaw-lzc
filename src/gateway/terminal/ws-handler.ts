@@ -207,8 +207,10 @@ export async function handleTerminalUpgrade(
         allowRealIpFallback,
         clients,
       });
+    // 懒猫微服：默认禁用设备认证（与 message-handler.ts 中 WebSocket connect 行为一致）
+    const effectiveDisableDeviceAuth = opts.controlUiConfig?.dangerouslyDisableDeviceAuth ?? true;
     const allowControlUiBypass =
-      opts.controlUiConfig?.dangerouslyDisableDeviceAuth === true &&
+      effectiveDisableDeviceAuth &&
       checkBrowserOrigin({
         requestHost: getHeader(req, "host"),
         origin: getHeader(req, "origin"),
