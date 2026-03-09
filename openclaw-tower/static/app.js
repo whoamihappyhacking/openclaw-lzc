@@ -371,8 +371,9 @@ function updateStatusUI(data) {
   // - operator confirmation is needed after restart/crash.
   const requiresReturnConfirmation = !!data.requiresReturnConfirmation;
   const showUpdateAction = !!data.updateRequired;
-  const showConfirmReadyAction =
-    requiresReturnConfirmation || (showUpdateAction && data.status === "running");
+  // Sync is optional: always show "回到 OpenClaw 世界" when an update is available,
+  // letting the user choose to skip the sync and enter directly.
+  const showConfirmReadyAction = requiresReturnConfirmation || showUpdateAction;
   const showConfirmSection = showUpdateAction || requiresReturnConfirmation;
 
   if (showConfirmSection) {

@@ -51,6 +51,10 @@ const (
 const (
 	MaxLogLines          = 500
 	startupHealthTimeout = 30 * time.Second
+	// Number of consecutive health check failures required before marking a running gateway as crashed.
+	// At 1-second check intervals this gives the gateway ~3 seconds to recover from transient hiccups
+	// (GC pauses, config reloads, high load) before Tower shows the crash UI.
+	crashThreshold = 3
 )
 
 type Config struct {
@@ -82,9 +86,10 @@ type Monitor struct {
 	lastRestartReason string
 	startTime         time.Time
 	startingDeadline  time.Time
-	crashCount        int
-	logs              []string
-	logsMu            sync.RWMutex
+	crashCount             int
+	consecutiveHealthFails int
+	logs                   []string
+	logsMu                 sync.RWMutex
 }
 
 func New(cfg Config) *Monitor {
@@ -1010,6 +1015,11 @@ func (m *Monitor) addLog(line string) {
 }
 
 func (m *Monitor) requiresReturnConfirmationLocked() bool {
+	// Only require confirmation when the gateway is actually alive (running/starting).
+	// If it crashed or stopped, there is nothing to "return" to.
+	if m.status != StatusRunning && m.status != StatusStarting {
+		return false
+	}
 	return m.awaitingReturn || (m.status == StatusRunning && m.crashCount > 0 && !m.userConfirmed)
 }
 
@@ -1039,6 +1049,15 @@ func (m *Monitor) IsUpdateRequired() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.updateRequired
+}
+
+// ClearUpdateRequired dismisses the update-required flag so the user can
+// enter OpenClaw without syncing first (sync is optional).
+func (m *Monitor) ClearUpdateRequired() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.updateRequired = false
+	m.updateReason = ""
 }
 
 // PromoteRunningIfReachable probes gateway liveness and updates status to running when reachable.
@@ -1217,6 +1236,7 @@ func (m *Monitor) startOpenClaw() error {
 	m.awaitingReturn = false
 	m.lastRestartReason = ""
 	m.startingDeadline = time.Now().Add(startupHealthTimeout)
+	m.consecutiveHealthFails = 0
 	m.mu.Unlock()
 
 	m.addLog("[tower] Starting OpenClaw...")
@@ -1315,6 +1335,45 @@ func (m *Monitor) startOpenClaw() error {
 			m.lastError = ""
 		} else {
 			// OpenClaw can restart itself and drop the original child handle.
+			// If a self-restart was already detected (via log tracking), keep
+			// waiting optimistically.
+			// Otherwise (e.g. manual kill), check if a gateway process is
+			// still alive before assuming a self-restart happened.
+			selfRestartDetected := m.awaitingReturn
+			if !selfRestartDetected {
+				// No self-restart was signalled via log tracking.
+				// Check whether a replacement gateway process is already running
+				// before assuming this is a self-restart.
+				m.mu.Unlock()
+				stillAlive := m.isOpenClawGatewayRunningByProcessName()
+				m.mu.Lock()
+				if !stillAlive {
+					// No gateway process found; this is a real termination, not a self-restart.
+					if err != nil {
+						m.status = StatusCrashed
+						m.lastError = err.Error()
+						m.crashCount++
+					} else {
+						m.status = StatusStopped
+						m.lastError = ""
+					}
+					m.startingDeadline = time.Time{}
+					m.userConfirmed = false
+					m.awaitingReturn = false
+					m.lastRestartReason = ""
+					m.cmd = nil
+					m.cmdDone = nil
+					m.stopRequested = false
+					m.mu.Unlock()
+					if err != nil {
+						m.addLog(fmt.Sprintf("[tower] OpenClaw process terminated (%v); no replacement process found, marking as crashed", err))
+					} else {
+						m.addLog("[tower] OpenClaw process exited cleanly; no replacement process found, marking as stopped")
+					}
+					return
+				}
+			}
+
 			// Keep status in "starting" and let health checks determine real liveness.
 			m.status = StatusStarting
 			m.userConfirmed = false
@@ -1419,6 +1478,7 @@ func (m *Monitor) checkHealth() {
 		m.status = StatusRunning
 		m.lastError = ""
 		m.startingDeadline = time.Time{}
+		m.consecutiveHealthFails = 0
 		if !wasRunning || m.startTime.IsZero() {
 			m.startTime = time.Now()
 		}
@@ -1457,15 +1517,22 @@ func (m *Monitor) checkHealth() {
 		m.addLog(fmt.Sprintf("[tower] Health check failed after startup timeout: %v", healthErr))
 		return
 	case StatusRunning:
+		m.consecutiveHealthFails++
+		if m.consecutiveHealthFails < crashThreshold {
+			m.mu.Unlock()
+			m.addLog(fmt.Sprintf("[tower] Health check failed (%d/%d): %v", m.consecutiveHealthFails, crashThreshold, healthErr))
+			return
+		}
 		m.status = StatusCrashed
 		m.lastError = healthErr.Error()
 		m.startingDeadline = time.Time{}
 		m.crashCount++
+		m.consecutiveHealthFails = 0
 		m.userConfirmed = false
 		m.awaitingReturn = false
 		m.lastRestartReason = ""
 		m.mu.Unlock()
-		m.addLog(fmt.Sprintf("[tower] Health check failed: %v", healthErr))
+		m.addLog(fmt.Sprintf("[tower] Health check failed %d consecutive times, marking as crashed: %v", crashThreshold, healthErr))
 		return
 	default:
 		m.mu.Unlock()
