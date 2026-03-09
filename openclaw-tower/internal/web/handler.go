@@ -237,15 +237,32 @@ func (h *Handler) handleRestoreDefault(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleConfirmReady(w http.ResponseWriter, r *http.Request) {
+	// Sync is optional: if update is required, clear the flag and let the user
+	// enter OpenClaw with the current (non-updated) version.
 	if h.config.Monitor.IsUpdateRequired() {
-		if h.config.Monitor.GetStatus() != monitor.StatusRunning && !h.config.Monitor.PromoteRunningIfReachable() {
-			h.jsonError(w, "Update required; please sync to latest OpenClaw first", http.StatusBadRequest)
+		h.config.Monitor.ClearUpdateRequired()
+		log.Printf("[tower] User chose to skip sync and enter OpenClaw directly")
+	}
+
+	status := h.config.Monitor.GetStatus()
+
+	// If OpenClaw is already running or reachable, just confirm.
+	if status == monitor.StatusRunning || h.config.Monitor.PromoteRunningIfReachable() {
+		h.config.Monitor.SetUserConfirmed(true)
+		h.jsonOK(w, "Confirmed, switching to OpenClaw")
+		return
+	}
+
+	// OpenClaw is not running; start it and confirm.
+	if status == monitor.StatusStopped || status == monitor.StatusCrashed {
+		if err := h.config.Monitor.StartOpenClaw(); err != nil {
+			h.jsonError(w, "Failed to start OpenClaw: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 	}
 
 	h.config.Monitor.SetUserConfirmed(true)
-	h.jsonOK(w, "Confirmed, switching to OpenClaw")
+	h.jsonOK(w, "Confirmed, OpenClaw starting")
 }
 
 func (h *Handler) handleLogs(w http.ResponseWriter, r *http.Request) {
